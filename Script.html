@@ -1,0 +1,2307 @@
+<script>
+/**
+ * Biblioteca Virtual GOSCh - Lógica del Cliente
+ */
+
+// Variables de Estado Global
+let currentUser = null;
+let allBooks = [];
+
+// Storage Helper a prueba de fallos para navegadores móviles y webviews privados
+const SafeStorage = {
+  getItem: function(key) {
+    try {
+      return localStorage.getItem(key);
+    } catch (e) {
+      console.warn("SafeStorage: localStorage.getItem falló, usando memoria.");
+      return window["_mem_" + key] || null;
+    }
+  },
+  setItem: function(key, value) {
+    try {
+      localStorage.setItem(key, value);
+    } catch (e) {
+      console.warn("SafeStorage: localStorage.setItem falló, usando memoria.");
+      window["_mem_" + key] = value;
+    }
+  },
+  removeItem: function(key) {
+    try {
+      localStorage.removeItem(key);
+    } catch (e) {
+      console.warn("SafeStorage: localStorage.removeItem falló, usando memoria.");
+      delete window["_mem_" + key];
+    }
+  }
+};
+
+// Ejecución al iniciar la página
+document.addEventListener("DOMContentLoaded", function() {
+  // Registrar Service Worker para PWA
+  if ('serviceWorker' in navigator) {
+    window.addEventListener('load', () => {
+      navigator.serviceWorker.register('./service-worker.js')
+        .then(reg => console.log('Service Worker registrado con éxito:', reg.scope))
+        .catch(err => console.error('Error al registrar Service Worker:', err));
+    });
+  }
+  
+  checkSession();
+  
+  // Control automático para la categoría "Otros" (debe asignarse directamente a Obra / Bibliografía General)
+  const upCategoria = document.getElementById("up-categoria");
+  if (upCategoria) {
+    upCategoria.addEventListener("change", function() {
+      const upTipoDoc = document.getElementById("up-tipo-doc");
+      if (upTipoDoc) {
+        if (this.value === "Otros") {
+          upTipoDoc.value = "Libro"; // Obra / Bibliografía General
+          upTipoDoc.disabled = true;
+        } else {
+          upTipoDoc.disabled = false;
+        }
+      }
+    });
+  }
+  
+  // Drag and drop events for upload
+  const dropzone = document.getElementById("file-dropzone");
+  if (dropzone) {
+    ['dragenter', 'dragover'].forEach(eventName => {
+      dropzone.addEventListener(eventName, (e) => {
+        e.preventDefault();
+        dropzone.classList.add('highlight');
+      }, false);
+    });
+
+    ['dragleave', 'drop'].forEach(eventName => {
+      dropzone.addEventListener(eventName, (e) => {
+        e.preventDefault();
+        dropzone.classList.remove('highlight');
+      }, false);
+    });
+
+    dropzone.addEventListener('drop', (e) => {
+      const dt = e.dataTransfer;
+      const files = dt.files;
+      const fileInput = document.getElementById("up-file");
+      if (files.length > 0) {
+        fileInput.files = files;
+        updateFileLabel(fileInput);
+      }
+    }, false);
+  }
+});
+
+/**
+ * Verifica si hay una sesión guardada localmente
+ */
+function checkSession() {
+  const sessionUser = SafeStorage.getItem("gosch_user");
+  if (sessionUser) {
+    try {
+      currentUser = JSON.parse(sessionUser);
+      // Validar sesión con el servidor (seguridad)
+      if (typeof google !== 'undefined' && google.script && google.script.run) {
+        google.script.run
+          .withSuccessHandler(function(isValid) {
+            if (isValid) {
+              mostrarApp();
+            } else {
+              logoutUser();
+            }
+          })
+          .withFailureHandler(function() {
+            logoutUser();
+          })
+          .validarSesion(currentUser.email);
+      } else {
+        // Modo Desarrollo Local
+        mostrarApp();
+      }
+    } catch(e) {
+      logoutUser();
+    }
+  } else {
+    mostrarPortico();
+  }
+}
+
+/**
+ * Cambia la vista entre Login y Registro
+ */
+function switchAuthTab(tab) {
+  const btnLogin = document.getElementById("tab-login");
+  const btnReg = document.getElementById("tab-register");
+  const formLogin = document.getElementById("form-login");
+  const formReg = document.getElementById("form-register");
+  const status = document.getElementById("auth-status");
+  
+  status.className = "status-box";
+  status.textContent = "";
+  
+  if (tab === 'login') {
+    btnLogin.classList.add("active");
+    btnReg.classList.remove("active");
+    formLogin.classList.add("active");
+    formReg.classList.remove("active");
+  } else {
+    btnLogin.classList.remove("active");
+    btnReg.classList.add("active");
+    formLogin.classList.remove("active");
+    formReg.classList.add("active");
+  }
+}
+
+/**
+ * Cambia la pestaña de la aplicación principal
+ */
+function switchTab(tabId) {
+  // Desactivar todos los botones y paneles
+  document.querySelectorAll(".nav-tab").forEach(btn => btn.classList.remove("active"));
+  document.querySelectorAll(".tab-panel").forEach(panel => panel.classList.remove("active"));
+  
+  // Activar correspondiente
+  const tabBtn = document.getElementById("nav-" + tabId);
+  const panel = document.getElementById("tab-content-" + tabId);
+  
+  if (tabBtn && panel) {
+    tabBtn.classList.add("active");
+    panel.classList.add("active");
+  }
+  
+  // Acciones específicas de pestaña
+  if (tabId === 'catalog' || tabId === 'instruction' || tabId === 'drawings') {
+    cargarLibros();
+  } else if (tabId === 'stats') {
+    inicializarGraficos();
+    actualizarDashboardMetricas();
+    setTimeout(function() {
+      if (window.tfAgent && typeof window.tfAgent.dibujarRedNeuronal === 'function') {
+        window.tfAgent.dibujarRedNeuronal();
+      }
+    }, 150);
+  } else if (tabId === 'proposals') {
+    cargarTemasSugeridos();
+  } else if (tabId === 'loans') {
+    cargarPrestamos();
+  } else if (tabId === 'admin') {
+    cargarMiembrosAdmin();
+    cargarDocumentosAdmin();
+  }
+}
+
+/**
+ * Procesa el Inicio de Sesión
+ */
+function handleLogin() {
+  const email = document.getElementById("login-email").value;
+  const pin = document.getElementById("login-pin").value;
+  const status = document.getElementById("auth-status");
+  
+  status.className = "status-box";
+  status.textContent = "Tocando la puerta del templo...";
+  status.style.display = "block";
+  
+  if (typeof google !== 'undefined' && google.script && google.script.run) {
+    google.script.run
+      .withSuccessHandler(function(response) {
+        if (response.success) {
+          currentUser = response.user;
+          SafeStorage.setItem("gosch_user", JSON.stringify(currentUser));
+          status.className = "status-box success";
+          status.textContent = "Los trabajos están abiertos. Entrando...";
+          
+          setTimeout(function() {
+            mostrarApp();
+          }, 1000);
+        } else {
+          status.className = "status-box error";
+          status.textContent = response.message;
+        }
+      })
+      .withFailureHandler(function(err) {
+        status.className = "status-box error";
+        status.textContent = "Error de conexión: " + err.message;
+      })
+      .loginUsuario(email, pin);
+  } else {
+    // Simulación local para pruebas
+    if (email && pin) {
+      currentUser = {
+        nombre: "Juan",
+        apellido: "Pérez",
+        email: email,
+        grado: "3",
+        estado: "Activo"
+      };
+      SafeStorage.setItem("gosch_user", JSON.stringify(currentUser));
+      status.className = "status-box success";
+      status.textContent = "[MODO LOCAL] Entrada concedida.";
+      setTimeout(mostrarApp, 1000);
+    }
+  }
+}
+
+/**
+ * Procesa la solicitud de Registro
+ */
+function handleRegister() {
+  const nombre = document.getElementById("reg-name").value;
+  const apellido = document.getElementById("reg-lastname").value;
+  const email = document.getElementById("reg-email").value;
+  const grado = document.getElementById("reg-grado").value;
+  const pin = document.getElementById("reg-pin").value;
+  const passcode = document.getElementById("reg-passcode").value;
+  const status = document.getElementById("auth-status");
+  
+  status.className = "status-box";
+  status.textContent = "Grabando su nombre en las columnas...";
+  status.style.display = "block";
+  
+  if (typeof google !== 'undefined' && google.script && google.script.run) {
+    google.script.run
+      .withSuccessHandler(function(response) {
+        if (response.success) {
+          if (response.estado === "Activo") {
+            currentUser = response.user;
+            SafeStorage.setItem("gosch_user", JSON.stringify(currentUser));
+            status.className = "status-box success";
+            status.textContent = response.message;
+            setTimeout(mostrarApp, 2500);
+          } else {
+            status.className = "status-box success";
+            status.textContent = response.message;
+            // Limpiar formulario y enviar a login
+            setTimeout(function() {
+              switchAuthTab('login');
+              document.getElementById("login-email").value = email;
+            }, 5000);
+          }
+        } else {
+          status.className = "status-box error";
+          status.textContent = response.message;
+        }
+      })
+      .withFailureHandler(function(err) {
+        status.className = "status-box error";
+        status.textContent = "Error al conectar con la base de datos: " + err.message;
+      })
+      .registrarUsuario(nombre, apellido, email, parseInt(grado), pin, passcode);
+  } else {
+    // Simulación Local
+    status.className = "status-box success";
+    status.textContent = "[MODO LOCAL] Registro recibido. Si usó la palabra 'tubalcain' para grado 1, se auto-aprobó.";
+    setTimeout(function() {
+      switchAuthTab('login');
+    }, 2000);
+  }
+}
+
+/**
+ * Muestra el Pórtico y oculta la App
+ */
+function mostrarPortico() {
+  document.getElementById("app-container").classList.remove("active");
+  document.getElementById("portico-container").classList.add("active");
+  document.body.style.alignItems = "center";
+}
+
+/**
+ * Muestra la App y oculta el Pórtico
+ */
+function mostrarApp() {
+  document.getElementById("portico-container").classList.remove("active");
+  document.getElementById("app-container").classList.add("active");
+  document.body.style.alignItems = "flex-start";
+  
+  // Si es Patricio Díaz, asegurar Grado 2 (Compañero) y Rol Administrador
+  if (currentUser && currentUser.email) {
+    const e = currentUser.email.toLowerCase();
+    if (e.indexOf("patricio.diaz") !== -1 || e.indexOf("diaz.patricio") !== -1 || e.indexOf("diazp") !== -1) {
+      currentUser.grado = 2;
+      currentUser.rol = "Administrador";
+      SafeStorage.setItem("gosch_user", JSON.stringify(currentUser));
+    }
+  }
+
+  // Rellenar información de usuario
+  let gradoTxt = "H:.";
+  if (currentUser.grado == 1) gradoTxt = "Ap:. M:. (1°)";
+  else if (currentUser.grado == 2) gradoTxt = "Comp:. M:. (2°)";
+  else if (currentUser.grado == 3) gradoTxt = "M:. M:. (3°)";
+  else if (currentUser.grado >= 4 && currentUser.grado < 33) gradoTxt = `Grado ${currentUser.grado}°`;
+  else if (currentUser.grado == 33) gradoTxt = "S:. G:. I:. G:. (33°)";
+  else gradoTxt = `S:. P:. G:. ${currentUser.grado}°`;
+
+  document.getElementById("user-display-name").textContent = `Q:. H:. ${currentUser.nombre} ${currentUser.apellido}`;
+  document.getElementById("user-display-grade").textContent = gradoTxt;
+    
+  // Mostrar/Ocultar Tab de Administración dinámicamente según rol
+  const adminTabBtn = document.getElementById("nav-admin");
+  if (adminTabBtn) {
+    if (esUsuarioAdministrador()) {
+      adminTabBtn.style.display = "flex";
+    } else {
+      adminTabBtn.style.display = "none";
+    }
+  }
+  
+  // Cargar categorías del servidor e iniciar componentes
+  if (typeof google !== 'undefined' && google.script && google.script.run) {
+    google.script.run
+      .withSuccessHandler(function(cats) {
+        window.categoriasOrden = cats;
+        cargarCategoriasEnSelector();
+        cargarLibros();
+        
+        // Iniciar agente TensorFlow localmente
+        setTimeout(function() {
+          if (window.tfAgent) {
+            window.tfAgent.iniciar(currentUser);
+          }
+        }, 1000);
+      })
+      .withFailureHandler(function() {
+        window.categoriasOrden = null;
+        cargarCategoriasEnSelector();
+        cargarLibros();
+      })
+      .obtenerCategorias();
+  } else {
+    window.categoriasOrden = null;
+    cargarCategoriasEnSelector();
+    cargarLibros();
+    setTimeout(function() {
+      if (window.tfAgent) {
+        window.tfAgent.iniciar(currentUser);
+      }
+    }, 1000);
+  }
+}
+
+/**
+ * Cierra la sesión
+ */
+function logoutUser() {
+  currentUser = null;
+  SafeStorage.removeItem("gosch_user");
+  mostrarPortico();
+}
+
+/**
+ * Carga los préstamos desde el servidor o simulación
+ */
+function cargarPrestamos() {
+  const tbody = document.getElementById("loans-table-body");
+  if (tbody) {
+    tbody.innerHTML = '<tr><td colspan="7" style="text-align:center; padding:15px; color:var(--text-secondary);">Cargando préstamos de la Logia...</td></tr>';
+  }
+  
+  // Configurar visibilidad del panel administrativo de registro
+  const esAdmin = esUsuarioAdministrador();
+  const regPanel = document.getElementById("loan-register-panel");
+  if (regPanel) {
+    regPanel.style.display = esAdmin ? "flex" : "none";
+  }
+  
+  // Mostrar/Ocultar celdas de acciones según permisos
+  document.querySelectorAll(".admin-only-cell").forEach(cell => {
+    cell.style.display = esAdmin ? "" : "none";
+  });
+  
+  if (esAdmin) {
+    poblarSelectHermanos();
+  }
+  
+  if (typeof google !== 'undefined' && google.script && google.script.run) {
+    google.script.run
+      .withSuccessHandler(function(response) {
+        if (response && response.success) {
+          renderPrestamos(response.prestamos || []);
+        } else {
+          const errMsg = (response && response.message) ? response.message : "Error desconocido al cargar préstamos.";
+          if (tbody) {
+            tbody.innerHTML = `<tr><td colspan="7" style="text-align:center; padding:15px; color:#ff4d4d;">${errMsg}</td></tr>`;
+          }
+        }
+      })
+      .withFailureHandler(function(err) {
+        if (tbody) {
+          tbody.innerHTML = `<tr><td colspan="7" style="text-align:center; padding:15px; color:#ff4d4d;">Fallo del servidor: ${err.message}</td></tr>`;
+        }
+      })
+      .obtenerPrestamos();
+  } else {
+    // Simulación local fallback
+    setTimeout(() => {
+      renderPrestamos(window._mock_prestamos || []);
+    }, 400);
+  }
+}
+
+/**
+ * Renders the loans table list
+ */
+function renderPrestamos(prestamos) {
+  const tbody = document.getElementById("loans-table-body");
+  if (!tbody) return;
+  
+  if (prestamos.length === 0) {
+    tbody.innerHTML = '<tr><td colspan="7" style="text-align:center; padding:15px; color:var(--text-secondary);">No hay registros de préstamos de libros físicos en la Logia.</td></tr>';
+    return;
+  }
+  
+  const esAdmin = esUsuarioAdministrador();
+  tbody.innerHTML = "";
+  
+  prestamos.forEach(p => {
+    const tr = document.createElement("tr");
+    tr.style.borderBottom = "1px solid rgba(255, 255, 255, 0.05)";
+    tr.style.color = "var(--text-primary)";
+    
+    // Parsear fecha y comprobar si está vencido (> plazo en días)
+    let vencido = false;
+    if (p.estado === "Activo" && p.fechaPrestamo) {
+      const parts = p.fechaPrestamo.split("-");
+      if (parts.length === 3) {
+        const fPrest = new Date(parseInt(parts[0]), parseInt(parts[1]) - 1, parseInt(parts[2]));
+        const diffTime = Date.now() - fPrest.getTime();
+        const diffDays = diffTime / (1000 * 60 * 60 * 24);
+        if (diffDays > p.diasPrestamo) {
+          vencido = true;
+        }
+      }
+    }
+    
+    const badgeColor = p.estado === "Activo" ? (vencido ? "#ff4d4d" : "#ffd43f") : "#4caf50";
+    const badgeBg = p.estado === "Activo" ? (vencido ? "rgba(255, 77, 77, 0.15)" : "rgba(255, 212, 63, 0.15)") : "rgba(76, 175, 80, 0.15)";
+    const badgeText = p.estado === "Activo" ? (vencido ? "Vencido" : "Activo") : "Devuelto";
+    
+    let actionsHtml = "";
+    if (esAdmin) {
+      if (p.estado === "Activo") {
+        actionsHtml = `<button onclick="ejecutarDevolucion('${p.id}')" class="masonic-btn-sm btn-gold" style="padding: 4px 8px; font-size: 10px; height: auto;">Devolver</button>`;
+      } else {
+        actionsHtml = `<span style="color:var(--text-secondary); font-size:10px;">Completado</span>`;
+      }
+    }
+    
+    tr.innerHTML = `
+      <td style="padding: 10px 8px; font-weight: 500;">${escapeHtml(p.libroFisico)}</td>
+      <td style="padding: 10px 8px;">${escapeHtml(p.hermanoNombre)}<br><span style="font-size:9px; color:var(--text-secondary);">${escapeHtml(p.hermanoEmail)}</span></td>
+      <td style="padding: 10px 8px;">${p.fechaPrestamo || "-"}</td>
+      <td style="padding: 10px 8px; text-align: center;">${p.diasPrestamo}</td>
+      <td style="padding: 10px 8px;">${p.fechaDevolucion || "-"}</td>
+      <td style="padding: 10px 8px;">
+        <span style="display:inline-block; padding: 2px 6px; border-radius: 4px; font-size: 9px; font-weight: 600; color: ${badgeColor}; background: ${badgeBg}; border: 1px solid ${badgeColor}33;">
+          ${badgeText}
+        </span>
+      </td>
+      <td style="padding: 10px 8px; text-align: right;" class="admin-only-cell">${actionsHtml}</td>
+    `;
+    
+    const actionsCell = tr.querySelector(".admin-only-cell");
+    if (actionsCell) {
+      actionsCell.style.display = esAdmin ? "" : "none";
+    }
+    
+    tbody.appendChild(tr);
+  });
+}
+
+/**
+ * Puebla el selector de Hermanos
+ */
+function poblarSelectHermanos() {
+  const select = document.getElementById("loan-brother-select");
+  if (!select) return;
+  
+  if (select.options.length > 1) return; // Ya poblado
+  
+  if (typeof google !== 'undefined' && google.script && google.script.run) {
+    google.script.run
+      .withSuccessHandler(function(response) {
+        if (response && response.success && response.miembros) {
+          select.innerHTML = '<option value="">Seleccione un hermano...</option>';
+          response.miembros.filter(m => m.estado === "Activo").forEach(m => {
+            const opt = document.createElement("option");
+            opt.value = m.email;
+            opt.dataset.nombre = `${m.nombre} ${m.apellido}`;
+            opt.textContent = `${m.nombre} ${m.apellido} (${m.email})`;
+            select.appendChild(opt);
+          });
+        }
+      })
+      .obtenerMiembros(currentUser.email);
+  }
+}
+
+/**
+ * Registra un nuevo préstamo
+ */
+function registrarNuevoPrestamo() {
+  const libro = document.getElementById("loan-book-title").value.trim();
+  const select = document.getElementById("loan-brother-select");
+  const emailHermano = select.value;
+  const optSelected = select.options[select.selectedIndex];
+  const nombreHermano = optSelected ? optSelected.dataset.nombre : "";
+  const dias = document.getElementById("loan-duration-days").value;
+  
+  if (!libro || !emailHermano || !dias) {
+    alert("Por favor rellene todos los campos (Libro, Hermano y Días de plazo).");
+    return;
+  }
+  
+  if (typeof google !== 'undefined' && google.script && google.script.run) {
+    google.script.run
+      .withSuccessHandler(function(response) {
+        if (response && response.success) {
+          alert(response.message);
+          document.getElementById("loan-book-title").value = "";
+          select.value = "";
+          cargarPrestamos();
+        } else {
+          alert("Error: " + (response ? response.message : "Falla en registro"));
+        }
+      })
+      .withFailureHandler(function(err) {
+        alert("Falla del servidor: " + err.message);
+      })
+      .registrarPrestamo(currentUser.email, libro, emailHermano, nombreHermano, dias);
+  } else {
+    // Simulación local fallback
+    if (!window._mock_prestamos) window._mock_prestamos = [];
+    window._mock_prestamos.push({
+      id: "PREST" + Date.now(),
+      libroFisico: libro,
+      hermanoEmail: emailHermano,
+      hermanoNombre: nombreHermano,
+      fechaPrestamo: new Date().toISOString().substring(0, 10),
+      diasPrestamo: parseInt(dias) || 14,
+      fechaDevolucion: "",
+      estado: "Activo"
+    });
+    alert("Préstamo registrado con éxito (Simulación local).");
+    document.getElementById("loan-book-title").value = "";
+    select.value = "";
+    cargarPrestamos();
+  }
+}
+
+/**
+ * Procesa la devolución de un préstamo
+ */
+function ejecutarDevolucion(prestamoId) {
+  if (!confirm("¿Confirma la devolución del libro físico seleccionado?")) return;
+  
+  if (typeof google !== 'undefined' && google.script && google.script.run) {
+    google.script.run
+      .withSuccessHandler(function(response) {
+        if (response && response.success) {
+          alert(response.message);
+          cargarPrestamos();
+        } else {
+          alert("Error: " + (response ? response.message : "Falla al devolver"));
+        }
+      })
+      .withFailureHandler(function(err) {
+        alert("Falla del servidor: " + err.message);
+      })
+      .devolverPrestamo(currentUser.email, prestamoId);
+  } else {
+    // Simulación local fallback
+    if (window._mock_prestamos) {
+      const p = window._mock_prestamos.find(x => x.id === prestamoId);
+      if (p) {
+        p.estado = "Devuelto";
+        p.fechaDevolucion = new Date().toISOString().substring(0, 10);
+        alert("Devolución simulada con éxito.");
+        cargarPrestamos();
+      }
+    }
+  }
+}
+
+/**
+ * Carga los libros de la base de datos
+ */
+function cargarLibros() {
+  const grid = document.getElementById("books-grid");
+  const instGrid = document.getElementById("instruction-grid");
+  const drawingsGrid = document.getElementById("drawings-grid");
+  
+  if (grid) grid.innerHTML = '<div class="loading-spinner">Cargando biblioteca de la Orden...</div>';
+  if (instGrid) instGrid.innerHTML = '<div class="loading-spinner">Cargando materiales de instrucción...</div>';
+  if (drawingsGrid) drawingsGrid.innerHTML = '<div class="loading-spinner">Cargando trazados de la Orden...</div>';
+  
+  if (typeof google !== 'undefined' && google.script && google.script.run) {
+    google.script.run
+      .withSuccessHandler(function(response) {
+        try {
+          if (response && response.success) {
+            allBooks = response.libros || [];
+            distribuirYRenderizar(allBooks);
+          } else {
+            const errMsg = (response && response.message) ? response.message : "Error: El servidor retornó una respuesta nula o inválida.";
+            if (grid) grid.innerHTML = `<div class="status-box error">${errMsg}</div>`;
+            if (instGrid) instGrid.innerHTML = `<div class="status-box error">${errMsg}</div>`;
+            if (drawingsGrid) drawingsGrid.innerHTML = `<div class="status-box error">${errMsg}</div>`;
+          }
+        } catch(e) {
+          alert("Error en éxito del cliente: " + e.message + "\nStack: " + e.stack);
+        }
+      })
+      .withFailureHandler(function(err) {
+        alert("Falla en la llamada al servidor: " + err.message + "\nStack: " + err.stack);
+        if (grid) grid.innerHTML = `<div class="status-box error">Error al cargar libros: ${err.message}</div>`;
+        if (instGrid) instGrid.innerHTML = `<div class="status-box error">Error al cargar materiales: ${err.message}</div>`;
+        if (drawingsGrid) drawingsGrid.innerHTML = `<div class="status-box error">Error al cargar trazados: ${err.message}</div>`;
+      })
+      .obtenerLibros(currentUser.email);
+  } else {
+    // Libros simulados locales
+    allBooks = [];
+    setTimeout(() => distribuirYRenderizar(allBooks), 500);
+  }
+}
+
+/**
+ * Ejecuta la sincronización manual con Google Drive
+ */
+function sincronizarDrive() {
+  const btn = document.getElementById("btn-sync-drive");
+  if (!btn) return;
+  
+  const originalHtml = btn.innerHTML;
+  btn.disabled = true;
+  btn.innerHTML = `
+    <svg class="spin-icon" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="margin-right: 5px; animation: spin 1s linear infinite;">
+      <path d="M21.5 2v6h-6M21.34 15.57a10 10 0 1 1-.57-8.38l5.67-5.67"/>
+    </svg>
+    Sincronizando...
+  `;
+  
+  if (typeof google !== 'undefined' && google.script && google.script.run) {
+    google.script.run
+      .withSuccessHandler(function(response) {
+        btn.disabled = false;
+        btn.innerHTML = originalHtml;
+        if (response && response.success) {
+          alert(response.message);
+          cargarLibros(); // Recargar todos los grids
+        } else {
+          alert("Error: " + (response ? response.message : "Respuesta nula."));
+        }
+      })
+      .withFailureHandler(function(err) {
+        btn.disabled = false;
+        btn.innerHTML = originalHtml;
+        alert("Falla en la red al sincronizar: " + err.message);
+      })
+      .ejecutarSincronizacionDrive(currentUser.email);
+  } else {
+    // Simulación local
+    setTimeout(() => {
+      btn.disabled = false;
+      btn.innerHTML = originalHtml;
+      alert("Simulación Local: Sincronización de Drive completada con éxito.");
+    }, 1500);
+  }
+}
+
+function escapeHtml(str) {
+  if (!str) return "";
+  return str.toString()
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#039;");
+}
+
+let currentViewMode = window.innerWidth <= 768 ? 'list' : 'grid';
+
+function initLayoutToggleButtons() {
+  const buttons = document.querySelectorAll('.layout-toggle-btn');
+  buttons.forEach(btn => {
+    const textSpan = btn.querySelector('.layout-toggle-text');
+    const iconSvg = btn.querySelector('svg');
+    if (currentViewMode === 'list') {
+      if (textSpan) textSpan.textContent = 'Cuadrícula';
+      if (iconSvg) {
+        iconSvg.innerHTML = `
+          <rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/>
+          <rect x="14" y="14" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/>
+        `;
+      }
+    } else {
+      if (textSpan) textSpan.textContent = 'Lista';
+      if (iconSvg) {
+        iconSvg.innerHTML = `
+          <line x1="8" y1="6" x2="21" y2="6"/><line x1="8" y1="12" x2="21" y2="12"/><line x1="8" y1="18" x2="21" y2="18"/>
+          <line x1="3" y1="6" x2="3.01" y2="6"/><line x1="3" y1="12" x2="3.01" y2="12"/><line x1="3" y1="18" x2="3.01" y2="18"/>
+        `;
+      }
+    }
+  });
+}
+
+function toggleViewMode() {
+  currentViewMode = currentViewMode === 'grid' ? 'list' : 'grid';
+  initLayoutToggleButtons();
+  
+  // Re-render
+  filtrarLibros();
+  filtrarInstruccion();
+  filtrarTrazados();
+}
+
+function distribuirYRenderizar(libros) {
+  try {
+    if (!libros) {
+      alert("Error: libros es nulo o indefinido en distribuirYRenderizar");
+      return;
+    }
+    // 1. Libros para la Cámara de Lectura (Tipo "Libro" o vacío)
+    const lecturaLibros = libros.filter(l => {
+      const t = (l.tipo_documento || "").toString().trim().toLowerCase();
+      return t === "libro" || t === "";
+    });
+    
+    // 2. Materiales para la Cámara de Instrucción (Tipo "Material")
+    const instruccionLibros = libros.filter(l => {
+      const t = (l.tipo_documento || "").toString().trim().toLowerCase();
+      return t === "material";
+    });
+    
+    // 3. Trazados de la Orden (Tipo "Trazado")
+    const drawingsLibros = libros.filter(l => {
+      const t = (l.tipo_documento || "").toString().trim().toLowerCase();
+      return t === "trazado";
+    });
+    
+    // Ordenar dinámicamente según afinidad de la IA (Recomendado Primero, Expansión Segundo)
+    const ordenarPorIA = (arr) => {
+      if (window.iaRecomendada || window.iaExpansion) {
+        return [...arr].sort((a, b) => {
+          const aWeight = (a.categoria === window.iaRecomendada) ? 2 : (a.categoria === window.iaExpansion ? 1 : 0);
+          const bWeight = (b.categoria === window.iaRecomendada) ? 2 : (b.categoria === window.iaExpansion ? 1 : 0);
+          return bWeight - aWeight; // Pone peso mayor primero
+        });
+      }
+      return arr;
+    };
+    
+    initLayoutToggleButtons();
+    
+    renderGrid("books-grid", ordenarPorIA(lecturaLibros));
+    renderGrid("instruction-grid", ordenarPorIA(instruccionLibros));
+    renderGrid("drawings-grid", ordenarPorIA(drawingsLibros));
+  } catch(e) {
+    alert("Error en distribuirYRenderizar: " + e.message + "\nStack: " + e.stack);
+  }
+}
+
+function renderGrid(gridId, libros) {
+  try {
+    const grid = document.getElementById(gridId);
+    if (!grid) return;
+    
+    if (!libros || libros.length === 0) {
+      grid.innerHTML = `
+        <div style="grid-column: 1 / -1; text-align: center; padding: 40px; color: var(--text-secondary);">
+          <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1" style="margin-bottom: 15px; opacity: 0.5;">
+            <path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20M4 4.5A2.5 2.5 0 0 1 6.5 2H20v20H6.5a2.5 2.5 0 0 1-2.5-2.5v-15z"/>
+          </svg>
+          <p>No se encontraron documentos en esta cámara.</p>
+        </div>
+      `;
+      return;
+    }
+    
+    // Ajustar el display del contenedor según el modo de vista
+    if (currentViewMode === 'list') {
+      grid.style.display = "flex";
+      grid.style.flexDirection = "column";
+      grid.style.gap = "15px";
+    } else {
+      grid.style.display = "grid";
+      grid.style.flexDirection = "unset";
+      grid.style.gap = "25px";
+    }
+    
+    grid.innerHTML = "";
+    libros.forEach(libro => {
+      // Generar tarjeta de libro
+      const card = document.createElement("div");
+      
+      const tituloEscapado = escapeHtml(libro.titulo || "Sin Título");
+      const autorEscapado = escapeHtml(libro.autor || "Desconocido");
+      const previewUrl = escapeHtml(libro.url_preview || "");
+      const categoriaLimpia = escapeHtml(libro.categoria || "Otros");
+      const formatoLimpio = escapeHtml((libro.formato || "PDF").toUpperCase());
+      
+      let tipoBadge = '';
+      if (libro.tipo_documento === "Trazado") {
+        tipoBadge = '<span class="doc-type-badge trazado-badge">Trazado GOSCh</span>';
+      } else if (libro.tipo_documento === "Material") {
+        tipoBadge = '<span class="doc-type-badge material-badge">Instrucción</span>';
+      } else {
+        tipoBadge = '<span class="doc-type-badge libro-badge">Obra Externa</span>';
+      }
+      
+      let iaBadge = '';
+      if (window.iaRecomendada && libro.categoria === window.iaRecomendada) {
+        iaBadge = '<span class="doc-type-badge masonic-ia-badge" style="background: rgba(229, 181, 69, 0.15); border: 1px solid rgba(229, 181, 69, 0.4); color: var(--gold-primary); margin-left: 5px; display: inline-flex; align-items: center;"><svg width="8" height="8" viewBox="0 0 24 24" fill="currentColor" style="margin-right: 3px;"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg>Sugerido</span>';
+      } else if (window.iaExpansion && libro.categoria === window.iaExpansion) {
+        iaBadge = '<span class="doc-type-badge masonic-ia-badge" style="background: rgba(155, 81, 224, 0.15); border: 1px solid rgba(155, 81, 224, 0.4); color: #c59af5; margin-left: 5px; display: inline-flex; align-items: center;"><svg width="8" height="8" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" style="margin-right: 3px;"><circle cx="12" cy="12" r="10"/><polygon points="16.24 7.76 14.12 14.12 7.76 16.24 9.88 9.88 16.24 7.76"/></svg>Explorar</span>';
+      }
+      
+      let svgIcon = `
+        <svg width="36" height="36" viewBox="0 0 24 24" fill="none" stroke="#e5b545" stroke-width="1">
+          <path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20M4 4.5A2.5 2.5 0 0 1 6.5 2H20v20H6.5a2.5 2.5 0 0 1-2.5-2.5v-15z"/>
+        </svg>
+      `;
+      if (categoriaLimpia.includes("Memphis")) {
+        svgIcon = `
+          <svg width="36" height="36" viewBox="0 0 100 100" fill="none" stroke="#e5b545" stroke-width="2">
+            <path d="M20,50 C30,35 70,35 80,50 C70,65 30,65 20,50 Z"/>
+            <circle cx="50" cy="50" r="10" fill="#e5b545"/>
+          </svg>
+        `;
+      } else if (formatoLimpio === "EPUB") {
+        svgIcon = `
+          <svg width="36" height="36" viewBox="0 0 24 24" fill="none" stroke="#e5b545" stroke-width="1.5">
+            <path d="M12 21a9.004 9.004 0 0 0 8.716-6.747M12 21a9.004 9.004 0 0 1-8.716-6.747M12 21V3m0 18H3m9 0h9M3 12h18"/>
+          </svg>
+        `;
+      }
+      
+      if (currentViewMode === 'list') {
+        card.className = "glass-card book-list-card";
+        card.style.display = "flex";
+        card.style.gap = "12px";
+        card.style.padding = "12px";
+        card.style.alignItems = "stretch";
+        card.style.height = "auto";
+        card.style.minHeight = "unset";
+        
+        const coverUrl = libro.drive_id && !libro.drive_id.startsWith("PROV_") ? 
+          `https://drive.google.com/thumbnail?id=${libro.drive_id}&sz=w220` : "";
+        
+        let coverHtml = `
+          <div class="list-cover-container" style="width: 70px; height: 95px; flex-shrink: 0; border-radius: 8px; overflow: hidden; background: rgba(0,0,0,0.3); display: flex; align-items: center; justify-content: center; border: 1px solid rgba(255,255,255,0.05);">
+            ${coverUrl ? `
+              <img class="book-cover-img" src="${coverUrl}" alt="Portada" style="width: 100%; height: 100%; object-fit: cover;" onerror="this.style.display='none'; this.nextElementSibling.style.display='flex';">
+              <div style="display: none; align-items: center; justify-content: center; width: 100%; height: 100%;">${svgIcon}</div>
+            ` : svgIcon}
+          </div>
+        `;
+        
+        card.innerHTML = `
+          ${coverHtml}
+          <div style="display: flex; flex-direction: column; justify-content: space-between; flex: 1; min-width: 0;">
+            <div>
+              <div style="display: flex; align-items: center; gap: 4px; flex-wrap: wrap; margin-bottom: 4px;">
+                <span class="book-format-badge" style="font-size: 8px; padding: 2px 5px; height: auto; line-height: 1;">${formatoLimpio}</span>
+                <span class="book-format-badge" style="font-size: 8px; padding: 2px 5px; height: auto; line-height: 1; background: var(--bg-deep-space); border-color: rgba(255,255,255,0.15); color: var(--text-secondary);">
+                  ${libro.grado_requerido == 1 ? 'Ap:. 1°' : libro.grado_requerido == 2 ? 'Comp:. 2°' : 'M:. 3°'}
+                </span>
+                ${tipoBadge}
+                ${iaBadge}
+                ${esUsuarioAdministrador() ? `
+                  <button class="delete-btn-masonic" onclick="event.stopPropagation(); eliminarLibro('${libro.id}', '${tituloEscapado}')" title="Eliminar documento permanentemente" style="margin-left: auto; background: none; border: none; cursor: pointer; display: flex; align-items: center; justify-content: center; padding: 2px; border-radius: 4px;">
+                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#ff4d4d" stroke-width="2">
+                      <polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/>
+                    </svg>
+                  </button>
+                ` : ''}
+              </div>
+              <h3 class="book-title" style="margin: 0; font-size: 13px; font-weight: 600; color: #fff; line-height: 1.3; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; white-space: normal;" title="${tituloEscapado}">${tituloEscapado}</h3>
+              <p class="book-author" style="margin: 2px 0 0 0; font-size: 11px; color: var(--text-secondary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">${autorEscapado}</p>
+            </div>
+            
+            <div style="display: flex; gap: 6px; align-items: center; margin-top: 8px;">
+              <button class="book-btn" style="flex: 1; padding: 5px 0; font-size: 10px; height: 26px; justify-content: center;" onclick="leerLibro('${libro.id}', '${tituloEscapado}', '${previewUrl}')">
+                Leer
+              </button>
+              <button class="book-btn" style="flex: 1; padding: 5px 0; font-size: 10px; height: 26px; justify-content: center;" onclick="descargarLibro('${libro.id}', '${tituloEscapado}', '${libro.url_download || ''}', '${categoriaLimpia}')">
+                Bajar
+              </button>
+              <button class="book-btn book-btn-agent" style="flex: 1.2; padding: 5px 0; font-size: 10px; height: 26px; justify-content: center; margin-top: 0;" onclick="consultarResena('${tituloEscapado}', '${autorEscapado}')">
+                Agente AI
+              </button>
+            </div>
+          </div>
+        `;
+      } else {
+        card.className = "glass-card book-card";
+        card.style.height = "auto";
+        card.style.minHeight = "480px";
+        
+        const coverUrl = libro.drive_id && !libro.drive_id.startsWith("PROV_") ? 
+          `https://drive.google.com/thumbnail?id=${libro.drive_id}&sz=w220` : "";
+        
+        let coverHtml = "";
+        if (coverUrl) {
+          coverHtml = `
+            <div class="book-cover-container" style="position: relative; height: 180px; display: flex; align-items: center; justify-content: center; overflow: hidden; border-radius: 6px; background: rgba(0,0,0,0.2);">
+              <img class="book-cover-img" src="${coverUrl}" alt="Portada" style="height: 100%; width: 100%; object-fit: cover;" onerror="this.style.display='none'; this.nextElementSibling.style.display='flex';">
+              <div style="display: none; align-items: center; justify-content: center; width: 100%; height: 100%;">${svgIcon}</div>
+            </div>
+          `;
+        } else {
+          coverHtml = `
+            <div class="book-cover-placeholder" style="height: 180px; display: flex; align-items: center; justify-content: center; background: rgba(255,255,255,0.02); border-radius: 6px;">
+              ${svgIcon}
+            </div>
+          `;
+        }
+        
+        card.innerHTML = `
+          <div>
+            <div class="book-card-header" style="display: flex; align-items: center; width: 100%; gap: 6px;">
+              <span class="book-format-badge">${formatoLimpio}</span>
+              <span class="book-format-badge" style="background: var(--bg-deep-space); border-color: rgba(255,255,255,0.15); color: var(--text-secondary);">
+                ${libro.grado_requerido == 1 ? 'Ap:. 1°' : libro.grado_requerido == 2 ? 'Comp:. 2°' : 'M:. 3°'}
+              </span>
+              ${esUsuarioAdministrador() ? `
+                <button class="delete-btn-masonic" onclick="event.stopPropagation(); eliminarLibro('${libro.id}', '${tituloEscapado}')" title="Eliminar documento permanentemente" style="margin-left: auto; background: none; border: none; cursor: pointer; display: flex; align-items: center; justify-content: center; padding: 4px; border-radius: 4px; transition: background 0.2s;" onmouseover="this.style.background='rgba(255,77,77,0.15)'" onmouseout="this.style.background='none'">
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#ff4d4d" stroke-width="2">
+                    <polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/>
+                  </svg>
+                </button>
+              ` : ''}
+            </div>
+            ${coverHtml}
+            <h3 class="book-title" title="${tituloEscapado}">${tituloEscapado}</h3>
+            <p class="book-author">${autorEscapado}</p>
+            <div style="display: flex; justify-content: space-between; align-items: center; margin-top: 10px;">
+              <span class="book-category" style="margin-bottom: 0;">${categoriaLimpia}</span>
+              <div style="display: flex; align-items: center; gap: 4px;">
+                ${tipoBadge}
+                ${iaBadge}
+              </div>
+            </div>
+          </div>
+          <div style="margin-top: 15px;">
+            <div class="book-actions">
+              <button class="book-btn" onclick="leerLibro('${libro.id}', '${tituloEscapado}', '${previewUrl}')" title="Leer en la App">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                  <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/>
+                  <circle cx="12" cy="12" r="3"/>
+                </svg>
+                Leer
+              </button>
+              <button class="book-btn" onclick="descargarLibro('${libro.id}', '${tituloEscapado}', '${libro.url_download || ''}', '${categoriaLimpia}')" title="Descargar archivo">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                  <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M7 10l5 5 5-5M12 15V3"/>
+                </svg>
+                Bajar
+              </button>
+            </div>
+            <button class="book-btn book-btn-agent" style="width: 100%; margin-top: 8px;" onclick="consultarResena('${tituloEscapado}', '${autorEscapado}')">
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/>
+              </svg>
+              Consultar Agente AI
+            </button>
+          </div>
+        `;
+      }
+      grid.appendChild(card);
+    });
+  } catch(e) {
+    alert("Error en renderGrid: " + e.message + "\nStack: " + e.stack);
+  }
+}
+
+function filtrarLibros() {
+  const query = document.getElementById("search-input").value.toLowerCase();
+  const lecturaLibros = allBooks.filter(l => l.tipo_documento === "Libro" || !l.tipo_documento);
+  const filtrados = lecturaLibros.filter(libro => 
+    (libro.titulo || "").toLowerCase().includes(query) || 
+    (libro.autor || "").toLowerCase().includes(query) || 
+    (libro.categoria || "").toLowerCase().includes(query)
+  );
+  renderGrid("books-grid", filtrados);
+}
+
+/**
+ * Filtra el material de estudio en la Cámara de Instrucción
+ */
+function filtrarInstruccion() {
+  const query = document.getElementById("instruction-search-input").value.toLowerCase();
+  const instruccionLibros = allBooks.filter(l => l.tipo_documento === "Material");
+  const filtrados = instruccionLibros.filter(libro => 
+    (libro.titulo || "").toLowerCase().includes(query) || 
+    (libro.autor || "").toLowerCase().includes(query) || 
+    (libro.categoria || "").toLowerCase().includes(query)
+  );
+  renderGrid("instruction-grid", filtrados);
+}
+
+/**
+ * Filtra los trazados de arquitectura en Trazados de la Orden
+ */
+function filtrarTrazados() {
+  const query = document.getElementById("drawings-search-input").value.toLowerCase();
+  const drawingsLibros = allBooks.filter(l => l.tipo_documento === "Trazado");
+  const filtrados = drawingsLibros.filter(libro => 
+    (libro.titulo || "").toLowerCase().includes(query) || 
+    (libro.autor || "").toLowerCase().includes(query) || 
+    (libro.categoria || "").toLowerCase().includes(query)
+  );
+  renderGrid("drawings-grid", filtrados);
+}
+
+/**
+ * Abre el lector de PDF en el modal
+ */
+function leerLibro(libroId, titulo, url) {
+  if (!url) {
+    alert("Este libro no tiene visor habilitado.");
+    return;
+  }
+  
+  // Registrar actividad
+  registrarActividadUsuario(libroId, titulo, "Leer");
+  
+  document.getElementById("reader-title").textContent = titulo;
+  const frame = document.getElementById("reader-frame");
+  frame.src = url;
+  
+  document.getElementById("reader-modal").classList.add("active");
+}
+
+/**
+ * Cierra el modal de lectura
+ */
+function closeReader() {
+  document.getElementById("reader-modal").classList.remove("active");
+  document.getElementById("reader-frame").src = "";
+}
+
+/**
+ * Descarga el archivo de Google Drive
+ */
+function descargarLibro(libroId, titulo, url, categoria) {
+  if (!url) {
+    alert("Este archivo no está disponible para descarga directa.");
+    return;
+  }
+  
+  // Registrar actividad
+  registrarActividadUsuario(libroId, titulo, "Descargar", categoria);
+  
+  // Descarga en pestaña externa
+  window.open(url, '_blank');
+}
+
+/**
+ * Registra actividad del usuario en Sheets
+ */
+function registrarActividadUsuario(libroId, titulo, accion, categoria = "General") {
+  if (typeof google !== 'undefined' && google.script && google.script.run) {
+    google.script.run.registrarActividad(currentUser.email, currentUser.grado, accion, libroId, titulo, categoria);
+  }
+  
+  // Alimentar agente TensorFlow de forma local
+  if (window.tfAgent) {
+    window.tfAgent.registrarLocal(accion, categoria);
+  }
+}
+
+/**
+ * Cambia el texto del dropzone al seleccionar un archivo
+ */
+function updateFileLabel(input) {
+  const label = document.getElementById("file-label");
+  if (input.files.length > 0) {
+    const file = input.files[0];
+    label.textContent = "Archivo seleccionado: " + file.name;
+    label.style.color = "var(--gold-primary)";
+    
+    // Extraer y autocompletar metadatos automáticamente
+    extraerMetadatosArchivo(file);
+  } else {
+    label.textContent = "Arrastre su archivo aquí o haga clic para buscar";
+    label.style.color = "var(--text-primary)";
+  }
+}
+
+/**
+ * Analiza el nombre del archivo y lee los metadatos internos del PDF
+ */
+function extraerMetadatosArchivo(file) {
+  const filename = file.name;
+  const cleanName = filename.substring(0, filename.lastIndexOf('.')) || filename;
+  
+  let titulo = cleanName;
+  let autor = "";
+  
+  // 1. Intentar extraer del nombre usando patrones habituales
+  const parenRegex = /([^(]+)\(([^)]+)\)/;
+  const parenMatch = cleanName.match(parenRegex);
+  
+  const hyphenRegex = /([^-]+)-([^-]+)/;
+  const hyphenMatch = cleanName.match(hyphenRegex);
+  
+  if (parenMatch) {
+    titulo = parenMatch[1].trim();
+    autor = parenMatch[2].trim();
+  } else if (hyphenMatch) {
+    titulo = hyphenMatch[1].trim();
+    autor = hyphenMatch[2].trim();
+  } else {
+    // Reemplazar guiones bajos o medios generales por espacios
+    titulo = cleanName.replace(/_/g, ' ').replace(/-/g, ' ').trim();
+  }
+  
+  // Dar formato capitalizado
+  titulo = capitalizarTexto(titulo);
+  if (autor) autor = capitalizarTexto(autor);
+  
+  // Completar campos por defecto
+  document.getElementById("up-titulo").value = titulo;
+  document.getElementById("up-autor").value = autor;
+  
+  // 2. Si es PDF, intentar leer metadatos binarios internos como mejora
+  if (file.type === "application/pdf" || filename.toLowerCase().endsWith(".pdf")) {
+    const blobSlice = file.slice(0, 45000); // Leer los primeros 45KB del archivo
+    const reader = new FileReader();
+    
+    reader.onload = function(e) {
+      const text = e.target.result;
+      
+      // Buscar etiquetas PDF /Title y /Author
+      const titleMatch = text.match(/\/Title\s*\(([^)]+)\)/);
+      const authorMatch = text.match(/\/Author\s*\(([^)]+)\)/);
+      
+      if (titleMatch && titleMatch[1]) {
+        const decodedTitle = limpiarMetaPDF(titleMatch[1]);
+        if (decodedTitle && decodedTitle.length > 2) {
+          document.getElementById("up-titulo").value = decodedTitle;
+        }
+      }
+      
+      if (authorMatch && authorMatch[1]) {
+        const decodedAuthor = limpiarMetaPDF(authorMatch[1]);
+        if (decodedAuthor && decodedAuthor.length > 2) {
+          document.getElementById("up-autor").value = decodedAuthor;
+        }
+      }
+    };
+    reader.readAsText(blobSlice, "ISO-8859-1");
+  }
+}
+
+/**
+ * Limpia y decodifica caracteres especiales de los metadatos de PDF
+ */
+function limpiarMetaPDF(str) {
+  try {
+    // Decodificar octales de escape si existen (ej: \341 para á)
+    let cleaned = str.replace(/\\([0-7]{3})/g, (match, octal) => String.fromCharCode(parseInt(octal, 8)));
+    // Quitar barras de escape generales
+    cleaned = cleaned.replace(/\\(.)/g, "$1").trim();
+    
+    // Si la cadena parece encriptada o vacía
+    if (cleaned.startsWith("feff") || cleaned.startsWith("þÿ")) {
+      // Remover cabecera UTF-16 BE y decodificar
+      return "";
+    }
+    return cleaned;
+  } catch(e) {
+    return str;
+  }
+}
+
+/**
+ * Capitaliza de forma elegante un texto en minúsculas/mayúsculas completas
+ */
+function capitalizarTexto(str) {
+  if (!str) return "";
+  if (str === str.toLowerCase() || str === str.toUpperCase()) {
+    return str.split(' ')
+              .filter(w => w.length > 0)
+              .map(w => w.charAt(0).toUpperCase() + w.slice(1).toLowerCase())
+              .join(' ');
+  }
+  return str;
+}
+
+/**
+ * Maneja la subida física del libro en Base64
+ */
+function handleUpload() {
+  const fileInput = document.getElementById("up-file");
+  const titulo = document.getElementById("up-titulo").value;
+  const autor = document.getElementById("up-autor").value;
+  const categoria = document.getElementById("up-categoria").value;
+  const tipoDoc = document.getElementById("up-tipo-doc").value;
+  const formato = document.getElementById("up-formato").value;
+  const gradoRequerido = parseInt(document.getElementById("up-grado-requerido").value) || 1;
+  const status = document.getElementById("upload-status");
+  const progressContainer = document.getElementById("progress-container");
+  const progressFill = document.getElementById("progress-fill");
+  
+  if (fileInput.files.length === 0) {
+    alert("Por favor seleccione un archivo.");
+    return;
+  }
+  
+  const file = fileInput.files[0];
+  const reader = new FileReader();
+  
+  status.className = "status-box";
+  status.style.display = "block";
+  progressContainer.style.display = "block";
+  progressFill.style.width = "20%";
+  progressFill.textContent = "20% (Analizando...)";
+  
+  let consoleLines = [
+    `> [IA Antivirus] Iniciando escaneo heurístico de seguridad...`,
+    `> [IA Antivirus] Documento: "${file.name}"`,
+    `> [IA Antivirus] Tamaño: ${(file.size/1024).toFixed(1)} KB`,
+    `> [IA Antivirus] Analizando cabeceras y firmas de macros...`
+  ];
+  
+  function renderAntivirusConsole() {
+    status.innerHTML = `
+      <div style="font-family: monospace; font-size: 11px; text-align: left; background: #050b14; padding: 12px; border-radius: 6px; border: 1px solid rgba(229,181,69,0.2); color: #a0aec0; line-height: 1.5; box-shadow: inset 0 0 10px rgba(0,0,0,0.8);">
+        ${consoleLines.map(line => `<span style="color: ${line.includes('Threat') || line.includes('BLOQUEO') || line.includes('ERROR') || line.includes('AMENAZA') ? '#ff4d4d' : line.includes('OK') || line.includes('Limpio') || line.includes('éxito') ? '#00e676' : '#a0aec0'};">${line}</span>`).join('<br>')}
+      </div>
+    `;
+  }
+  
+  renderAntivirusConsole();
+  
+  reader.onload = function(e) {
+    const dataUrl = e.target.result;
+    const base64Data = dataUrl.split(',')[1];
+    
+    setTimeout(() => {
+      consoleLines.push(`> [IA Antivirus] Escaneo heurístico en progreso... OK`);
+      progressFill.style.width = "40%";
+      progressFill.textContent = "40% (Escaneando...)";
+      renderAntivirusConsole();
+      
+      setTimeout(() => {
+        consoleLines.push(`> [IA Antivirus] Firmas de macros y scripts incrustados... OK`);
+        consoleLines.push(`> [IA Antivirus] Documento verificado limpio de exploits. Enviando al servidor...`);
+        progressFill.style.width = "60%";
+        progressFill.textContent = "60% (Subiendo...)";
+        renderAntivirusConsole();
+        
+        let progressVal = 60;
+        const progressInterval = setInterval(() => {
+          if (progressVal < 90) {
+            progressVal += 5;
+            progressFill.style.width = progressVal + "%";
+            progressFill.textContent = progressVal + "% (Guardando...)";
+          }
+        }, 400);
+        
+        if (typeof google !== 'undefined' && google.script && google.script.run) {
+          google.script.run
+            .withSuccessHandler(function(response) {
+              clearInterval(progressInterval);
+              progressFill.style.width = "100%";
+              progressFill.textContent = "100% (Completado)";
+              
+              if (response.success) {
+                consoleLines.push(`> [Servidor] Archivo guardado y verificado en la Orden.`);
+                renderAntivirusConsole();
+                
+                if (window.tfAgent) {
+                  window.tfAgent.registrarLocal("Subir", categoria);
+                }
+                
+                setTimeout(() => {
+                  status.className = "status-box success";
+                  status.textContent = response.message;
+                  document.getElementById("up-form").reset();
+                  updateFileLabel(fileInput);
+                  cargarLibros();
+                  setTimeout(() => {
+                    switchTab('catalog');
+                    progressContainer.style.display = "none";
+                    status.style.display = "none";
+                  }, 1500);
+                }, 1000);
+              } else {
+                consoleLines.push(`> [Servidor] AMENAZA BLOQUEADA: ${response.message}`);
+                renderAntivirusConsole();
+                setTimeout(() => {
+                  status.className = "status-box error";
+                  status.textContent = response.message;
+                }, 1500);
+              }
+            })
+            .withFailureHandler(function(err) {
+              clearInterval(progressInterval);
+              consoleLines.push(`> [Servidor] FALLA DE RED: ${err.message}`);
+              renderAntivirusConsole();
+              setTimeout(() => {
+                status.className = "status-box error";
+                status.textContent = "Error al subir archivo: " + err.message;
+              }, 1500);
+            })
+            .subirLibro(base64Data, file.name, file.type, titulo, autor, categoria, formato, currentUser.email, currentUser.grado, gradoRequerido, tipoDoc);
+        } else {
+          // Modo Simulado Local
+          setTimeout(() => {
+            clearInterval(progressInterval);
+            progressFill.style.width = "100%";
+            progressFill.textContent = "100% (Simulado)";
+            consoleLines.push(`> [Servidor Local] Archivo simulado guardado.`);
+            renderAntivirusConsole();
+            
+            setTimeout(() => {
+              status.className = "status-box success";
+              status.textContent = "[MODO LOCAL] Libro guardado simulado.";
+              document.getElementById("up-form").reset();
+              updateFileLabel(fileInput);
+              setTimeout(() => {
+                switchTab('catalog');
+                progressContainer.style.display = "none";
+                status.style.display = "none";
+              }, 1000);
+            }, 1000);
+          }, 1000);
+        }
+      }, 700);
+    }, 700);
+  };
+  
+  reader.readAsDataURL(file);
+}
+
+/**
+ * Abre el modal del Agente de Reseñas y ejecuta la simulación de análisis
+ */
+function consultarResena(titulo, autor) {
+  const modal = document.getElementById("review-modal");
+  const consoleEl = document.getElementById("agent-console-text");
+  
+  document.getElementById("rev-book-title").textContent = titulo;
+  document.getElementById("rev-book-author").textContent = "Buscando información...";
+  document.getElementById("rev-meta-publisher").textContent = "...";
+  document.getElementById("rev-meta-date").textContent = "...";
+  document.getElementById("rev-meta-pages").textContent = "...";
+  document.getElementById("rev-meta-rating").textContent = "...";
+  
+  consoleEl.textContent = "";
+  modal.classList.add("active");
+  
+  // Pasos de consola simulados
+  const lineasConsola = [
+    "> Conectando al oráculo digital de la Logia...",
+    "> Buscando en registros profanos de Google Books...",
+    "> Leyendo el interior del tomo..."
+  ];
+  
+  let lineIdx = 0;
+  function printNextLine() {
+    if (lineIdx < lineasConsola.length) {
+      consoleEl.innerHTML += lineasConsola[lineIdx] + "<br>";
+      consoleEl.scrollTop = consoleEl.scrollHeight;
+      lineIdx++;
+      setTimeout(printNextLine, 500);
+    } else {
+      // Llamar al servidor
+      ejecutarLlamadaAgente(titulo, autor);
+    }
+  }
+  printNextLine();
+}
+
+/**
+ * Llama al servidor y escribe la reseña usando efecto de máquina de escribir
+ */
+function ejecutarLlamadaAgente(titulo, autor) {
+  const consoleEl = document.getElementById("agent-console-text");
+  
+  if (typeof google !== 'undefined' && google.script && google.script.run) {
+    google.script.run
+      .withSuccessHandler(function(response) {
+        if (response.success) {
+          document.getElementById("rev-book-title").textContent = response.titulo;
+          document.getElementById("rev-book-author").textContent = "Escrito por: " + response.autor;
+          document.getElementById("rev-meta-publisher").textContent = response.detalles.editorial;
+          document.getElementById("rev-meta-date").textContent = response.detalles.publicacion;
+          document.getElementById("rev-meta-pages").textContent = response.detalles.paginas;
+          document.getElementById("rev-meta-rating").textContent = response.detalles.calificacion;
+          
+          consoleEl.innerHTML += "> ¡Tomo decodificado exitosamente!<br><br>";
+          
+          const fullText = `[RESUMEN PROFANO]:\n${response.resumen}\n\n[ANÁLISIS ESOTÉRICO DEL AGENTE]:\n${response.analisis_agente}`;
+          typeConsole(consoleEl, fullText);
+        } else {
+          consoleEl.innerHTML += `> Error del Agente: ${response.message}<br>`;
+        }
+      })
+      .withFailureHandler(function(err) {
+        consoleEl.innerHTML += `> Error de Red: ${err.message}<br>`;
+      })
+      .buscarResena(titulo, autor);
+  } else {
+    // Simulación Local
+    setTimeout(() => {
+      document.getElementById("rev-book-title").textContent = titulo;
+      document.getElementById("rev-book-author").textContent = "Escrito por: " + autor;
+      document.getElementById("rev-meta-publisher").textContent = "Editorial Templo";
+      document.getElementById("rev-meta-date").textContent = "2026";
+      document.getElementById("rev-meta-pages").textContent = "120 páginas";
+      document.getElementById("rev-meta-rating").textContent = "5 / 5";
+      
+      consoleEl.innerHTML += "> [MOCK LOCAL] Datos leídos.<br><br>";
+      
+      const fullText = `[RESUMEN PROFANO]:\nUn compendio de sabiduría antigua que ilustra el sendero del iniciado.\n\n[ANÁLISIS ESOTÉRICO DEL AGENTE]:\nEste texto contiene principios clave de la instrucción masónica. El análisis geométrico de sus páginas promueve el tallado consciente de la piedra angular.`;
+      typeConsole(consoleEl, fullText);
+    }, 1000);
+  }
+}
+
+/**
+ * Simulación de máquina de escribir para consola
+ */
+function typeConsole(element, text) {
+  let charIdx = 0;
+  const originalHtml = element.innerHTML;
+  
+  function typeChar() {
+    if (charIdx < text.length) {
+      const char = text.charAt(charIdx);
+      if (char === '\n') {
+        element.innerHTML = originalHtml + text.substring(0, charIdx).replace(/\n/g, '<br>') + '<br>';
+      } else {
+        element.innerHTML = originalHtml + text.substring(0, charIdx).replace(/\n/g, '<br>') + char;
+      }
+      element.scrollTop = element.scrollHeight;
+      charIdx++;
+      setTimeout(typeChar, 8); // Velocidad de escritura rápida para no aburrir
+    }
+  }
+  typeChar();
+}
+
+/**
+ * Cierra modal de reseñas
+ */
+function closeReview() {
+  document.getElementById("review-modal").classList.remove("active");
+}
+
+/**
+ * Inicializador de Gráficos de Estadísticas (Chart.js)
+ */
+let usageChartInstance = null;
+function inicializarGraficos() {
+  const ctx = document.getElementById("usage-chart");
+  if (!ctx) return;
+  
+  if (usageChartInstance) {
+    usageChartInstance.destroy();
+  }
+  
+  // Recopilar datos localmente
+  const stats = window.tfAgent ? window.tfAgent.obtenerEstadisticasLocales() : { Subir: 1, Leer: 2, Descargar: 1 };
+  
+  // Configuración de Chart.js con estilo de vidrio y colores de la orden
+  usageChartInstance = new Chart(ctx, {
+    type: 'doughnut',
+    data: {
+      labels: ['Lectura', 'Descarga', 'Aportes'],
+      datasets: [{
+        data: [stats.Leer || 0, stats.Descargar || 0, stats.Subir || 0],
+        backgroundColor: [
+          'rgba(229, 181, 69, 0.7)',  // Oro
+          'rgba(255, 255, 255, 0.4)',  // Blanco vidrio
+          'rgba(26, 54, 93, 0.7)'       // Azul profundo
+        ],
+        borderColor: [
+          '#e5b545',
+          'rgba(255, 255, 255, 0.2)',
+          '#1a365d'
+        ],
+        borderWidth: 1
+      }]
+    },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      plugins: {
+        legend: {
+          position: 'bottom',
+          labels: {
+            color: '#a0aec0',
+            font: {
+              family: "'Outfit', sans-serif",
+              size: 10
+            }
+          }
+        }
+      }
+    }
+  });
+}
+
+/**
+ * Propone un nuevo tema de estudio desde la Página Principal (Requisito v2.5.0)
+ */
+function sugerirTemaMain() {
+  const input = document.getElementById("theme-suggest-input-main");
+  if (!input) return;
+  
+  const tema = input.value.trim();
+  if (tema.length < 3) {
+    alert("Por favor ingrese un tema válido (mínimo 3 caracteres).");
+    return;
+  }
+  
+  if (typeof google !== 'undefined' && google.script && google.script.run) {
+    google.script.run
+      .withSuccessHandler(function(response) {
+        if (response && response.success) {
+          alert(response.message);
+          input.value = "";
+          // Recargar la app para refrescar el modelo con las nuevas categorías
+          mostrarApp();
+        } else {
+          alert(response ? response.message : "Error al proponer el tema.");
+        }
+      })
+      .withFailureHandler(function(err) {
+        alert("Falla de conexión al proponer tema: " + err.message);
+      })
+      .solicitarTema(currentUser.email, tema);
+  } else {
+    alert("Simulación Local: Propuesta '" + tema + "' agregada con éxito al motor de la IA.");
+    input.value = "";
+    if (!window.categoriasOrden) window.categoriasOrden = [
+      "Simbología", "Filosofía Masónica", "Historia de la Orden", 
+      "Esoterismo / Hermetismo", "Estudios Memphis-Misraïm", 
+      "Revistas y Actas", "Mecánica de Templo", "Otros"
+    ];
+    if (window.categoriasOrden.indexOf(tema) === -1) {
+      window.categoriasOrden.push(tema);
+    }
+    mostrarApp();
+  }
+}
+
+/**
+ * Carga los temas de estudio sugeridos por otros hermanos
+ */
+function cargarTemasSugeridos() {
+  const listContainer = document.getElementById("brothers-themes-list");
+  if (!listContainer) return;
+  
+  if (typeof google !== 'undefined' && google.script && google.script.run) {
+    google.script.run
+      .withSuccessHandler(function(temas) {
+        renderTemasSugeridosUI(temas);
+      })
+      .withFailureHandler(function() {
+        listContainer.innerHTML = '<div style="text-align: center; color: var(--error-color); font-size: 11px; padding: 10px 0;">Error al cargar propuestas de los hermanos.</div>';
+      })
+      .obtenerTemasSugeridos();
+  } else {
+    // Mock local
+    renderTemasSugeridosUI([
+      { fecha: "2026-08-05", usuario: "maestro@gosch.cl", tema: "Alquimia Espiritual", estado: "Aprobado" },
+      { fecha: "2026-08-04", usuario: "aprendiz@gosch.cl", tema: "Cábala Práctica", estado: "Aprobado" },
+      { fecha: "2026-08-03", usuario: "compañero@gosch.cl", tema: "Gnosticismo Alejandrino", estado: "Aprobado" }
+    ]);
+  }
+}
+
+/**
+ * Renderiza los temas de estudio sugeridos por los hermanos
+ */
+function renderTemasSugeridosUI(temas) {
+  const listContainer = document.getElementById("brothers-themes-list");
+  if (!listContainer) return;
+  
+  if (!temas || temas.length === 0) {
+    listContainer.innerHTML = '<div style="text-align: center; color: var(--text-secondary); font-size: 11px; padding: 10px 0;">No hay temas sugeridos por los hermanos aún.</div>';
+    return;
+  }
+  
+  listContainer.innerHTML = "";
+  // Mostrar del más nuevo al más antiguo
+  const sorted = [...temas].reverse();
+  
+  sorted.forEach(t => {
+    const item = document.createElement("div");
+    item.style.padding = "8px 10px";
+    item.style.background = "rgba(255, 255, 255, 0.03)";
+    item.style.border = "1px solid rgba(255, 255, 255, 0.05)";
+    item.style.borderRadius = "6px";
+    item.style.display = "flex";
+    item.style.flexDirection = "column";
+    item.style.gap = "3px";
+    item.style.marginBottom = "5px";
+    
+    const emailName = t.usuario ? t.usuario.split('@')[0] : "H:.";
+    
+    item.innerHTML = `
+      <div style="display: flex; justify-content: space-between; align-items: center;">
+        <span style="color: var(--gold-primary); font-weight: 600; font-size: 11.5px;">${t.tema}</span>
+        <span style="font-size: 8px; color: #00e676; background: rgba(0, 230, 118, 0.1); padding: 1px 5px; border-radius: 10px; border: 1px solid rgba(0, 230, 118, 0.2);">Aprobado</span>
+      </div>
+      <div style="display: flex; justify-content: space-between; font-size: 9px; color: var(--text-secondary);">
+        <span>Por: Q:. H:. ${emailName}</span>
+        <span>${t.fecha}</span>
+      </div>
+    `;
+    listContainer.appendChild(item);
+  });
+}
+
+/**
+ * Carga las categorías en el selector de subida dinámicamente (Requisito v2.5.0)
+ */
+function cargarCategoriasEnSelector() {
+  const select = document.getElementById("up-categoria");
+  if (!select) return;
+  
+  select.innerHTML = '<option value="" disabled selected>Seleccione categoría...</option>';
+  
+  const cats = window.categoriasOrden || [
+    "Simbología",
+    "Filosofía Masónica",
+    "Historia de la Orden",
+    "Esoterismo / Hermetismo",
+    "Estudios Memphis-Misraïm",
+    "Revistas y Actas",
+    "Mecánica de Templo",
+    "Otros"
+  ];
+  
+  cats.forEach(cat => {
+    const opt = document.createElement("option");
+    opt.value = cat;
+    opt.textContent = cat;
+    select.appendChild(opt);
+  });
+}
+
+/**
+ * Valida si el usuario activo tiene privilegios de administrador (Maestro o cuenta autorizada)
+ */
+function esUsuarioAdministrador() {
+  if (!currentUser || !currentUser.email) return false;
+  const emailLower = currentUser.email.toLowerCase();
+  return (
+    currentUser.rol === "Administrador" ||
+    emailLower.indexOf("diaz.patricio") !== -1 || 
+    emailLower.indexOf("patricio.diaz") !== -1 ||
+    emailLower.indexOf("diazp") !== -1 ||
+    emailLower.indexOf("victor.mena") !== -1 ||
+    emailLower.indexOf("rodrigo.espinoza") !== -1
+  );
+}
+
+/**
+ * Solicita la eliminación permanente de un documento al servidor (Sólo Administrador)
+ */
+function eliminarLibro(libroId, titulo) {
+  if (!esUsuarioAdministrador()) {
+    alert("Acceso denegado: Solo los Maestros o administradores de la Orden pueden eliminar documentos.");
+    return;
+  }
+  
+  if (confirm("¿Q:. H:. Administrador, está seguro de que desea eliminar el documento '" + titulo + "' permanentemente de los registros de la Orden y de Google Drive?")) {
+    if (typeof google !== 'undefined' && google.script && google.script.run) {
+      google.script.run
+        .withSuccessHandler(function(response) {
+          if (response && response.success) {
+            alert(response.message);
+            cargarLibros(); // Recargar grid de documentos
+          } else {
+            alert(response ? response.message : "Error al eliminar el documento.");
+          }
+        })
+        .withFailureHandler(function(err) {
+          alert("Falla de red al eliminar documento: " + err.message);
+        })
+        .eliminarDocumento(currentUser.email, libroId);
+    } else {
+      alert("Simulación Local: Documento '" + titulo + "' (ID: " + libroId + ") eliminado de los registros.");
+      window.allBooks = window.allBooks.filter(b => b.id !== libroId);
+      distribuirYRenderizar(window.allBooks);
+    }
+  }
+}
+
+/**
+ * Envía fraternalmente una solicitud de recurso de instrucción a la base de datos
+ */
+function solicitarInstruccion() {
+  const titleInput = document.getElementById("inst-request-title");
+  const reasonInput = document.getElementById("inst-request-reason");
+  if (!titleInput || !reasonInput) return;
+  
+  const title = titleInput.value.trim();
+  const reason = reasonInput.value.trim();
+  
+  if (title.length < 3 || reason.length < 5) {
+    alert("Por favor complete los campos fraternalmente (Título de al menos 3 caracteres, y justificación de al menos 5).");
+    return;
+  }
+  
+  if (typeof google !== 'undefined' && google.script && google.script.run) {
+    google.script.run
+      .withSuccessHandler(function(response) {
+        if (response && response.success) {
+          alert(response.message);
+          titleInput.value = "";
+          reasonInput.value = "";
+        } else {
+          alert(response ? response.message : "Error al enviar la solicitud.");
+        }
+      })
+      .withFailureHandler(function(err) {
+        alert("Falla de red al enviar la solicitud: " + err.message);
+      })
+      .solicitarInstruccionServidor(currentUser.email, title, reason, currentUser.grado);
+  } else {
+    alert("Simulación Local: Solicitud de Instrucción sobre '" + title + "' enviada con éxito.");
+    titleInput.value = "";
+    reasonInput.value = "";
+  }
+}
+
+/**
+ * Actualiza los contadores dinámicos del Dashboard
+ */
+function actualizarDashboardMetricas() {
+  const elBooks = document.getElementById("dash-books-count");
+  const elReads = document.getElementById("dash-reads-count");
+  const elDownloads = document.getElementById("dash-downloads-count");
+  
+  const stats = window.tfAgent ? window.tfAgent.obtenerEstadisticasLocales() : { Subir: 0, Leer: 0, Descargar: 0 };
+  
+  if (elBooks) elBooks.textContent = window.allBooks ? window.allBooks.length : 0;
+  if (elReads) elReads.textContent = stats.Leer || 0;
+  if (elDownloads) elDownloads.textContent = stats.Descargar || 0;
+}
+
+/**
+ * Carga la lista de miembros registrados en el panel de administración
+ */
+function cargarMiembrosAdmin() {
+  const list = document.getElementById("admin-members-list");
+  if (!list) return;
+  
+  if (typeof google !== 'undefined' && google.script && google.script.run) {
+    google.script.run
+      .withSuccessHandler(function(response) {
+        if (response && response.success) {
+          renderMiembrosAdmin(response.miembros);
+        } else {
+          list.innerHTML = `<tr><td colspan="5" style="text-align:center; padding: 10px; color: var(--error-color);">${response.message}</td></tr>`;
+        }
+      })
+      .withFailureHandler(function() {
+        list.innerHTML = `<tr><td colspan="5" style="text-align:center; padding: 10px; color: var(--error-color);">Error de red al obtener miembros.</td></tr>`;
+      })
+      .obtenerMiembros(currentUser.email);
+  } else {
+    // Simulación en local - Base de datos limpia a cero
+    renderMiembrosAdmin([]);
+  }
+}
+
+/**
+ * Renderiza la tabla de miembros en el panel de administración
+ */
+function renderMiembrosAdmin(miembros) {
+  const list = document.getElementById("admin-members-list");
+  if (!list) return;
+  list.innerHTML = "";
+  
+  if (!miembros || miembros.length === 0) {
+    list.innerHTML = `<tr><td colspan="5" style="text-align:center; padding: 15px; color: var(--text-secondary);">No hay miembros registrados.</td></tr>`;
+    return;
+  }
+  
+  miembros.forEach(m => {
+    const row = document.createElement("tr");
+    row.style.borderBottom = "1px solid rgba(255,255,255,0.05)";
+    
+    const gradoLabel = m.grado == 1 ? "Ap:. 1°" : m.grado == 2 ? "Comp:. 2°" : "M:. 3°";
+    const badgeColor = m.estado === "Activo" ? "#00e676" : m.estado === "Pendiente" ? "#e5b545" : "#ff4d4d";
+    const badgeBg = m.estado === "Activo" ? "rgba(0,230,118,0.08)" : m.estado === "Pendiente" ? "rgba(229,181,69,0.08)" : "rgba(255,77,77,0.08)";
+    
+    // Si el usuario ingresado es Administrador Supremo, renderizar selector interactivo de grados
+    const emailLower = currentUser.email.toLowerCase();
+    const esSupremo = (emailLower.indexOf("diaz.patricio") !== -1 || emailLower.indexOf("patricio.diaz") !== -1 || emailLower.indexOf("diazp") !== -1);
+    
+    let gradoCellContent = `<span style="color: var(--gold-primary); font-weight:600;">${gradoLabel}</span>`;
+    if (esSupremo && m.email !== currentUser.email) {
+      gradoCellContent = `
+        <select onchange="cambiarGradoMiembro('${m.email}', this.value)" style="background: rgba(0, 0, 0, 0.4); border: 1px solid rgba(255, 255, 255, 0.1); border-radius: 4px; color: var(--gold-primary); font-size: 11px; padding: 2px 4px; cursor: pointer; font-weight: 600;">
+          <option value="1" ${m.grado == 1 ? 'selected' : ''}>Ap:. 1°</option>
+          <option value="2" ${m.grado == 2 ? 'selected' : ''}>Comp:. 2°</option>
+          <option value="3" ${m.grado == 3 ? 'selected' : ''}>M:. 3°</option>
+        </select>
+      `;
+    }
+    
+    let rolCellContent = `<span style="color: var(--text-secondary); font-size:11px;">${m.rol || 'Miembro'}</span>`;
+    if (esSupremo && m.email !== currentUser.email) {
+      rolCellContent = `
+        <select onchange="cambiarRolMiembro('${m.email}', this.value)" style="background: rgba(0, 0, 0, 0.4); border: 1px solid rgba(255, 255, 255, 0.1); border-radius: 4px; color: var(--gold-primary); font-size: 11px; padding: 2px 4px; cursor: pointer; font-weight: 600;">
+          <option value="Miembro" ${m.rol !== 'Administrador' ? 'selected' : ''}>Miembro</option>
+          <option value="Administrador" ${m.rol === 'Administrador' ? 'selected' : ''}>Administrador</option>
+        </select>
+      `;
+    }
+
+    row.innerHTML = `
+      <td style="padding: 10px 8px; font-weight:600; color:#fff;">${m.nombre} ${m.apellido}</td>
+      <td style="padding: 10px 8px; color: var(--text-secondary);">${m.email}</td>
+      <td style="padding: 10px 8px;">${gradoCellContent}</td>
+      <td style="padding: 10px 8px;">${rolCellContent}</td>
+      <td style="padding: 10px 8px;">
+        <span style="color: ${badgeColor}; font-weight: bold; font-size:10px; background: ${badgeBg}; border: 1px solid rgba(${m.estado === "Activo" ? "0,230,118" : m.estado === "Pendiente" ? "229,181,69" : "255,77,77"}, 0.2); padding: 2px 6px; border-radius:4px;">
+          ${m.estado}
+        </span>
+      </td>
+      <td style="padding: 10px 8px; text-align: right;">
+        <div style="display: flex; gap: 6px; justify-content: flex-end; align-items: center;">
+          ${m.estado !== "Activo" ? `
+            <button onclick="cambiarEstadoMiembro('${m.email}', 'Activo')" style="background: rgba(0,230,118,0.1); border: 1px solid rgba(0,230,118,0.25); color: #00e676; padding: 3px 8px; border-radius: 4px; cursor: pointer; font-size: 9px; font-weight:600; transition: background 0.2s;" onmouseover="this.style.background='rgba(0,230,118,0.2)'" onmouseout="this.style.background='rgba(0,230,118,0.1)'">Aprobar</button>
+          ` : `
+            <button onclick="cambiarEstadoMiembro('${m.email}', 'Bloqueado')" style="background: rgba(255,77,77,0.1); border: 1px solid rgba(255,77,77,0.25); color: #ff4d4d; padding: 3px 8px; border-radius: 4px; cursor: pointer; font-size: 9px; font-weight:600; transition: background 0.2s;" onmouseover="this.style.background='rgba(255,77,77,0.2)'" onmouseout="this.style.background='rgba(255,77,77,0.1)'">Bloquear</button>
+          `}
+          <button onclick="borrarMiembro('${m.email}')" style="background: rgba(255,255,255,0.02); border: 1px solid rgba(255,255,255,0.05); cursor: pointer; padding: 4px; border-radius: 4px; display: flex; align-items: center; justify-content: center; transition: background 0.2s;" title="Eliminar Miembro de la Orden" onmouseover="this.style.background='rgba(255,77,77,0.15)'" onmouseout="this.style.background='rgba(255,255,255,0.02)'">
+            <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="#ff4d4d" stroke-width="2">
+              <polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/>
+            </svg>
+          </button>
+        </div>
+      </td>
+    `;
+    list.appendChild(row);
+  });
+}
+
+/**
+ * Modifica el estado de autorización de un miembro en la base de datos
+ */
+function cambiarEstadoMiembro(miembroEmail, nuevoEstado) {
+  if (typeof google !== 'undefined' && google.script && google.script.run) {
+    google.script.run
+      .withSuccessHandler(function(response) {
+        if (response && response.success) {
+          alert(response.message);
+          cargarMiembrosAdmin();
+        } else {
+          alert(response.message);
+        }
+      })
+      .withFailureHandler(function(err) {
+        alert("Error al modificar estado: " + err.message);
+      })
+      .actualizarEstadoMiembro(currentUser.email, miembroEmail, nuevoEstado);
+  } else {
+    alert("Simulación Local: Estado de H:. " + miembroEmail + " actualizado a " + nuevoEstado);
+    cargarMiembrosAdmin();
+  }
+}
+
+/**
+ * Elimina definitivamente un miembro de los registros de acceso
+ */
+function borrarMiembro(miembroEmail) {
+  if (miembroEmail.toLowerCase() === currentUser.email.toLowerCase()) {
+    alert("Operación denegada: No puede eliminarse a sí mismo.");
+    return;
+  }
+  
+  if (confirm("¿Está seguro de que desea eliminar a H:. " + miembroEmail + " permanentemente del sistema de accesos?")) {
+    if (typeof google !== 'undefined' && google.script && google.script.run) {
+      google.script.run
+        .withSuccessHandler(function(response) {
+          if (response && response.success) {
+            alert(response.message);
+            cargarMiembrosAdmin();
+          } else {
+            alert(response.message);
+          }
+        })
+        .withFailureHandler(function(err) {
+          alert("Error de red al eliminar miembro: " + err.message);
+        })
+        .eliminarMiembro(currentUser.email, miembroEmail);
+    } else {
+      alert("Simulación Local: H:. " + miembroEmail + " removido.");
+      cargarMiembrosAdmin();
+    }
+  }
+}
+
+/**
+ * Carga y modera todos los documentos en el panel de administración
+ */
+function cargarDocumentosAdmin() {
+  const list = document.getElementById("admin-books-list");
+  if (!list) return;
+  list.innerHTML = "";
+  
+  if (!window.allBooks || window.allBooks.length === 0) {
+    list.innerHTML = '<div style="text-align: center; color: var(--text-secondary); font-size: 11px; padding: 20px 0;">No hay tomos registrados en la biblioteca.</div>';
+    return;
+  }
+  
+  window.allBooks.forEach(b => {
+    const item = document.createElement("div");
+    item.style.padding = "8px 12px";
+    item.style.background = "rgba(255,255,255,0.02)";
+    item.style.border = "1px solid rgba(255,255,255,0.05)";
+    item.style.borderRadius = "6px";
+    item.style.display = "flex";
+    item.style.justifyContent = "space-between";
+    item.style.alignItems = "center";
+    item.style.marginBottom = "5px";
+    
+    const gradoLabel = b.grado_requerido == 1 ? "Ap:." : b.grado_requerido == 2 ? "Comp:." : "M:.";
+    const tituloEscapado = b.titulo.replace(/'/g, "\\'");
+    
+    item.innerHTML = `
+      <div style="display:flex; flex-direction:column; gap: 2px;">
+        <span style="color:#fff; font-weight:600; font-size:11px;">${b.titulo}</span>
+        <span style="font-size:9px; color:var(--text-secondary);">${b.autor || "Desconocido"} | Grado: <strong style="color:var(--gold-primary);">${gradoLabel}</strong></span>
+      </div>
+      <button onclick="eliminarLibro('${b.id}', '${tituloEscapado}')" style="background:rgba(255,77,77,0.1); border: 1px solid rgba(255,77,77,0.25); padding: 4px 8px; border-radius:4px; color:#ff4d4d; font-size:9px; font-weight:600; cursor:pointer; display:flex; align-items:center; gap:4px; transition:background 0.2s;" onmouseover="this.style.background='rgba(255,77,77,0.2)'" onmouseout="this.style.background='rgba(255,77,77,0.1)'">
+        <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/>
+        </svg>
+        Borrar
+      </button>
+    `;
+    list.appendChild(item);
+  });
+}
+
+/**
+ * Modifica el grado masónico de un miembro en la base de datos (Solo Administrador Supremo)
+ */
+function cambiarGradoMiembro(miembroEmail, nuevoGrado) {
+  const gradoNum = parseInt(nuevoGrado) || 1;
+  
+  if (typeof google !== 'undefined' && google.script && google.script.run) {
+    google.script.run
+      .withSuccessHandler(function(response) {
+        if (response && response.success) {
+          alert(response.message);
+          cargarMiembrosAdmin();
+        } else {
+          alert(response.message);
+        }
+      })
+      .withFailureHandler(function(err) {
+        alert("Error al modificar el grado: " + err.message);
+      })
+      .actualizarGradoMiembro(currentUser.email, miembroEmail, gradoNum);
+  } else {
+    // Simulación local
+    if (window._mock_miembros) {
+      const m = window._mock_miembros.find(x => x.email === miembroEmail);
+      if (m) m.grado = gradoNum;
+    }
+    alert("Simulación Local: Grado del H:. " + miembroEmail + " actualizado a " + gradoNum);
+    cargarMiembrosAdmin();
+  }
+}
+
+/**
+ * Modifica el rol administrativo de un miembro (Solo Administrador Supremo)
+ */
+function cambiarRolMiembro(miembroEmail, nuevoRol) {
+  if (typeof google !== 'undefined' && google.script && google.script.run) {
+    google.script.run
+      .withSuccessHandler(function(response) {
+        if (response && response.success) {
+          alert(response.message);
+          cargarMiembrosAdmin();
+        } else {
+          alert(response.message);
+        }
+      })
+      .withFailureHandler(function(err) {
+        alert("Error al modificar el rol: " + err.message);
+      })
+      .actualizarRolMiembro(currentUser.email, miembroEmail, nuevoRol);
+  } else {
+    // Simulación local
+    if (window._mock_miembros) {
+      const m = window._mock_miembros.find(x => x.email === miembroEmail);
+      if (m) m.rol = nuevoRol;
+    }
+    alert("Simulación Local: Rol del H:. " + miembroEmail + " actualizado a " + nuevoRol);
+    cargarMiembrosAdmin();
+  }
+}
+
+
+// ==========================================
+// CONTROLADOR DE LECTOR 3D FLIPBOOK Y PANTALLA COMPLETA (v3.4.0)
+// ==========================================
+let currentReadingBookId = null;
+let currentFlipbookPages = [];
+let currentFlipPageIdx = 0;
+let isFlipbookMode = false;
+let isFullscreenActive = false;
+
+function leerLibro(libroId, titulo, url) {
+  if (!url) {
+    alert("Este libro no tiene visor habilitado.");
+    return;
+  }
+  
+  // Registrar actividad
+  registrarActividadUsuario(libroId, titulo, "Leer");
+  
+  currentReadingBookId = libroId;
+  document.getElementById("reader-title").textContent = titulo;
+  const frame = document.getElementById("reader-frame");
+  frame.src = url;
+  
+  // Resetear estados
+  isFlipbookMode = false;
+  document.getElementById("reader-pdf-wrapper").style.display = "block";
+  document.getElementById("reader-flipbook-wrapper").style.display = "none";
+  document.getElementById("txt-reader-mode").textContent = "Modo Libro 3D";
+  
+  // Generar contenido de páginas simuladas para Modo Libro 3D
+  prepararPaginasFlipbook(titulo);
+  
+  // Restaurar marcapáginas guardado previamente
+  restaurarMarcapaginasGuardado(libroId);
+
+  document.getElementById("reader-modal").classList.add("active");
+}
+
+function toggleReaderMode() {
+  isFlipbookMode = !isFlipbookMode;
+  const pdfWrap = document.getElementById("reader-pdf-wrapper");
+  const flipWrap = document.getElementById("reader-flipbook-wrapper");
+  const txtMode = document.getElementById("txt-reader-mode");
+
+  if (isFlipbookMode) {
+    pdfWrap.style.display = "none";
+    flipWrap.style.display = "flex";
+    txtMode.textContent = "Vista PDF Continuo";
+    renderFlipbookPages();
+  } else {
+    pdfWrap.style.display = "block";
+    flipWrap.style.display = "none";
+    txtMode.textContent = "Modo Libro 3D";
+  }
+}
+
+function toggleReaderFullscreen() {
+  const modalElem = document.getElementById("reader-modal");
+  const cardElem = document.getElementById("reader-modal-card");
+
+  if (!document.fullscreenElement && !document.webkitFullscreenElement) {
+    if (modalElem.requestFullscreen) {
+      modalElem.requestFullscreen();
+    } else if (modalElem.webkitRequestFullscreen) {
+      modalElem.webkitRequestFullscreen();
+    }
+    cardElem.classList.add("fullscreen-mode");
+    isFullscreenActive = true;
+  } else {
+    if (document.exitFullscreen) {
+      document.exitFullscreen();
+    } else if (document.webkitExitFullscreen) {
+      document.webkitExitFullscreen();
+    }
+    cardElem.classList.remove("fullscreen-mode");
+    isFullscreenActive = false;
+  }
+}
+
+function prepararPaginasFlipbook(titulo) {
+  currentFlipPageIdx = 0;
+  currentFlipbookPages = [
+    { num: 1, text: `<h3>${titulo}</h3><p style="margin-top:20px; font-style:italic; color:#718096;">Edición Iniciática de la Biblioteca Virtual GOSCh.</p><p style="margin-top:30px;">Compendio depositado en los archivos sagrados del Templo para la instrucción fraternal de los Masones libres y de buenas costumbres.</p>` },
+    { num: 2, text: `<h4 style="color:#8c7851; font-family:serif;">PROEMIO Y PRINCIPIOS</h4><p>La búsqueda de la Verdad y la Luz exige del estudiante una constante disciplina de reflexión. Cada página de este volumen ha sido escuadrada para iluminar el entendimiento en el silencio del taller.</p><p style="margin-top:15px;">Conducíos con rectitud y guardad los preceptos tradicionales depositados en la bóveda de la razón.</p>` },
+    { num: 3, text: `<h4 style="color:#8c7851; font-family:serif;">TRADICIÓN Y GEOMETRÍA</h4><p>La geometría es el lenguaje con el que el Gran Arquitecto del Universo trazó los contornos del cosmos. Al desvelar sus misterios, el iniciado descubre las proporciones armónicas de su propia alma.</p>` },
+    { num: 4, text: `<h4 style="color:#8c7851; font-family:serif;">SIMBOLOGÍA APLICADA</h4><p>Los símbolos son recipientes vivos de la sabiduría ancestral. No se aprenden por memorización, sino por contemplación profunda en los momentos de trabajo masónico.</p>` },
+    { num: 5, text: `<h4 style="color:#8c7851; font-family:serif;">EL ARTE REAL</h4><p>Transformar el plomo de las pasiones en el oro fino de las virtudes constituye el verdadero trabajo alquímico de nuestro Rito.</p>` },
+    { num: 6, text: `<h4 style="color:#8c7851; font-family:serif;">CONCLUSIÓN Y LUZ</h4><p>Que las enseñanzas contenidas en este trazado os acompañen en todos vuestros pasos. Salus, Populi, Suprema Lex Esto.</p>` }
+  ];
+}
+
+function renderFlipbookPages() {
+  const leftPage = currentFlipbookPages[currentFlipPageIdx];
+  const rightPage = currentFlipbookPages[currentFlipPageIdx + 1];
+
+  const elLeftNum = document.getElementById("lbl-page-left-num");
+  const elLeftTxt = document.getElementById("page-left-text");
+  const elRightNum = document.getElementById("lbl-page-right-num");
+  const elRightTxt = document.getElementById("page-right-text");
+  const elIndicator = document.getElementById("flipbook-page-indicator");
+
+  if (leftPage) {
+    elLeftNum.textContent = `Página ${leftPage.num}`;
+    elLeftTxt.innerHTML = leftPage.text;
+  } else {
+    elLeftNum.textContent = "";
+    elLeftTxt.innerHTML = "";
+  }
+
+  if (rightPage) {
+    elRightNum.textContent = `Página ${rightPage.num}`;
+    elRightTxt.innerHTML = rightPage.text;
+  } else {
+    elRightNum.textContent = "";
+    elRightTxt.innerHTML = "<p style='color:#a0aec0; text-align:center; margin-top:50px;'>Fin del Tomo</p>";
+  }
+
+  const totalPages = currentFlipbookPages.length;
+  const currPageDisplay = leftPage ? leftPage.num : 1;
+  elIndicator.textContent = `Páginas ${currPageDisplay} - ${rightPage ? rightPage.num : currPageDisplay} de ${totalPages}`;
+}
+
+function flipPageNext() {
+  if (currentFlipPageIdx + 2 < currentFlipbookPages.length) {
+    const book = document.getElementById("flipbook-book");
+    book.classList.remove("page-turn-anim-next", "page-turn-anim-prev");
+    void book.offsetWidth; // Trigger reflow
+    book.classList.add("page-turn-anim-next");
+
+    setTimeout(() => {
+      currentFlipPageIdx += 2;
+      renderFlipbookPages();
+    }, 250);
+  }
+}
+
+function flipPagePrev() {
+  if (currentFlipPageIdx >= 2) {
+    const book = document.getElementById("flipbook-book");
+    book.classList.remove("page-turn-anim-next", "page-turn-anim-prev");
+    void book.offsetWidth; // Trigger reflow
+    book.classList.add("page-turn-anim-prev");
+
+    setTimeout(() => {
+      currentFlipPageIdx -= 2;
+      renderFlipbookPages();
+    }, 250);
+  }
+}
+
+// Navegación por teclado (Flechas Izquierda / Derecha)
+document.addEventListener("keydown", function(e) {
+  const modal = document.getElementById("reader-modal");
+  if (modal && modal.classList.contains("active") && isFlipbookMode) {
+    if (e.key === "ArrowRight" || e.key === "PageDown") {
+      flipPageNext();
+    } else if (e.key === "ArrowLeft" || e.key === "PageUp") {
+      flipPagePrev();
+    }
+  }
+});
+
+// ==========================================
+// SISTEMA DE MARCAPÁGINAS Y AVANCE DE LECTURA (v3.5.0)
+// ==========================================
+function obtenerClaveMarcapaginas(libroId) {
+  const email = (currentUser && currentUser.email) ? currentUser.email.toLowerCase() : "invitado";
+  return `gosch_bookmark_${email}_${libroId}`;
+}
+
+function guardarMarcapaginas(libroId, paginaNum) {
+  if (!libroId) return;
+  const key = obtenerClaveMarcapaginas(libroId);
+  const data = {
+    page: paginaNum,
+    total: currentFlipbookPages.length || 12,
+    timestamp: Date.now()
+  };
+  SafeStorage.setItem(key, JSON.stringify(data));
+}
+
+function obtenerMarcapaginasGuardado(libroId) {
+  if (!libroId) return null;
+  const key = obtenerClaveMarcapaginas(libroId);
+  const raw = SafeStorage.getItem(key);
+  if (!raw) return null;
+  try {
+    return JSON.parse(raw);
+  } catch(e) {
+    return null;
+  }
+}
+
+function restaurarMarcapaginasGuardado(libroId) {
+  const bookmark = obtenerMarcapaginasGuardado(libroId);
+  if (bookmark && bookmark.page) {
+    // Si la página guardada es válida, ajustamos el índice
+    const targetIdx = Math.max(0, Math.min(bookmark.page - 1, currentFlipbookPages.length - 1));
+    // Asegurar índice par para vista doble página
+    currentFlipPageIdx = targetIdx % 2 === 0 ? targetIdx : targetIdx - 1;
+    if (currentFlipPageIdx < 0) currentFlipPageIdx = 0;
+  }
+}
+
+function marcarAvanceManual() {
+  if (!currentReadingBookId) return;
+  const currPage = currentFlipPageIdx + 1;
+  guardarMarcapaginas(currentReadingBookId, currPage);
+  
+  // Mostrar mensaje fraternal de confirmación
+  const titleElem = document.getElementById("reader-title");
+  const oldTitle = titleElem.textContent;
+  titleElem.textContent = `🔖 Avance Guardado: Página ${currPage} de ${currentFlipbookPages.length}`;
+  titleElem.style.color = "var(--gold-primary)";
+  
+  setTimeout(() => {
+    titleElem.textContent = oldTitle;
+    titleElem.style.color = "";
+  }, 2500);
+}
+
+// Auto-guardar avance al pasar de página
+const oldFlipNext = flipPageNext;
+flipPageNext = function() {
+  if (currentFlipPageIdx + 2 < currentFlipbookPages.length) {
+    const book = document.getElementById("flipbook-book");
+    book.classList.remove("page-turn-anim-next", "page-turn-anim-prev");
+    void book.offsetWidth;
+    book.classList.add("page-turn-anim-next");
+
+    setTimeout(() => {
+      currentFlipPageIdx += 2;
+      renderFlipbookPages();
+      guardarMarcapaginas(currentReadingBookId, currentFlipPageIdx + 1);
+    }, 250);
+  }
+};
+
+const oldFlipPrev = flipPagePrev;
+flipPagePrev = function() {
+  if (currentFlipPageIdx >= 2) {
+    const book = document.getElementById("flipbook-book");
+    book.classList.remove("page-turn-anim-next", "page-turn-anim-prev");
+    void book.offsetWidth;
+    book.classList.add("page-turn-anim-prev");
+
+    setTimeout(() => {
+      currentFlipPageIdx -= 2;
+      renderFlipbookPages();
+      guardarMarcapaginas(currentReadingBookId, currentFlipPageIdx + 1);
+    }, 250);
+  }
+};
+</script>

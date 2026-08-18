@@ -1,0 +1,758 @@
+<!--
+   Biblioteca Virtual GOSCh - TensorFlow.js AutoML & Autoevolución
+   Módulo de Inteligencia Artificial Cliente
+-->
+<script>
+window.tfAgent = (function() {
+  // Configuración de la IA
+  const CONFIG_IA = {
+    CATEGORIAS: [
+      "Simbología",
+      "Filosofía Masónica",
+      "Historia de la Orden",
+      "Esoterismo / Hermetismo",
+      "Estudios Memphis-Misraïm",
+      "Revistas y Actas",
+      "Mecánica de Templo",
+      "Otros"
+    ],
+    POBLACION_TAMANO: 12,
+    MUTACION_RATA: 0.15,
+    INPUT_DIM: 3, // [Grado Normalizado, Hora Normalizada, Día de la Semana]
+    OUTPUT_DIM: 8 // Correspondiente a las 8 categorías
+  };
+
+  // Estado del Agente
+  let estado = {
+    inicializado: false,
+    usuario: null,
+    poblacion: [],
+    generacion: 0,
+    mejorModeloIdx: 0,
+    autoevolucionActiva: false,
+    intervaloAuto: null,
+    historialLocal: [], // Datos de entrenamiento locales
+    conteosActividad: { Leer: 0, Descargar: 0, Subir: 0 }
+  };
+
+  // Base de datos de entrenamiento limpia a cero para iniciar de forma auténtica
+  const DATOS_SEMILLA = [];
+
+  /**
+   * Inicializa el agente de TensorFlow
+   */
+  function iniciar(usuarioActivo) {
+    if (estado.inicializado) return;
+    
+    // Cargar categorías dinámicas si están disponibles
+    if (window.categoriasOrden && window.categoriasOrden.length > 0) {
+      CONFIG_IA.CATEGORIAS = window.categoriasOrden;
+      CONFIG_IA.OUTPUT_DIM = window.categoriasOrden.length;
+    }
+    
+    estado.usuario = usuarioActivo;
+    cargarHistorialPrevio();
+    crearPoblacionInicial();
+    estado.inicializado = true;
+    
+    // Ejecutar evaluación inicial
+    evaluarPoblacion();
+    actualizarDashboard();
+    
+    // Dibujar la primera red
+    setTimeout(dibujarRedNeuronal, 500);
+    
+    // Iniciar auto-evolución automática en segundo plano (Requisito v2.5.0)
+    estado.autoevolucionActiva = true;
+    estado.intervaloAuto = setInterval(function() {
+      evolveGeneration();
+    }, 5000);
+  }
+
+  /**
+   * Carga el historial de actividad y si no hay datos, usa la semilla
+   */
+  function cargarHistorialPrevio() {
+    estado.historialLocal = [...DATOS_SEMILLA];
+    
+    // Si Apps Script cargó datos, los incorporamos
+    if (typeof google !== 'undefined' && google.script && google.script.run) {
+      google.script.run
+        .withSuccessHandler(function(registros) {
+          estado.conteosActividad = { Leer: 0, Descargar: 0, Subir: 0 };
+          if (registros && registros.length > 0) {
+            registros.forEach(r => {
+              const catIdx = CONFIG_IA.CATEGORIAS.indexOf(r.categoria);
+              if (catIdx !== -1) {
+                const date = new Date(r.timestamp);
+                estado.historialLocal.push({
+                  grado: parseInt(r.grado) || 1,
+                  hora: date.getHours(),
+                  dia: date.getDay(),
+                  categoriaIdx: catIdx
+                });
+                
+                // Conteo estadístico
+                if (estado.conteosActividad[r.accion] !== undefined) {
+                  estado.conteosActividad[r.accion]++;
+                }
+              }
+            });
+            // Guardar lecturas de contadores generales en el UI
+            actualizarContadoresUI();
+            actualizarEstadisticasGrado(registros);
+          } else {
+            actualizarContadoresUI();
+            actualizarEstadisticasGrado([]);
+          }
+        })
+        .obtenerDatosEntrenamiento();
+    }
+  }
+
+  function actualizarContadoresUI() {
+    const elRead = document.getElementById("stat-reads-count");
+    const elDown = document.getElementById("stat-downloads-count");
+    if (elRead) elRead.textContent = estado.conteosActividad.Leer;
+    if (elDown) elDown.textContent = estado.conteosActividad.Descargar;
+  }
+
+  /**
+   * Genera estadísticas de temas preferidos según el grado masónico simbólico
+   */
+  function actualizarEstadisticasGrado(registros) {
+    const elStats = document.getElementById("grade-stats-content");
+    if (!elStats) return;
+    
+    const counts = { 1: {}, 2: {}, 3: {} };
+    
+    registros.forEach(r => {
+      let gId = 1;
+      const uGrado = parseInt(r.grado) || 1;
+      if (uGrado === 2) gId = 2;
+      else if (uGrado >= 3) gId = 3;
+      
+      const cat = r.categoria || "General";
+      counts[gId][cat] = (counts[gId][cat] || 0) + 1;
+    });
+    
+    const getTopCategory = (gradeCounts) => {
+      let topCat = "Sin consultas";
+      let maxVal = 0;
+      for (const cat in gradeCounts) {
+        if (gradeCounts[cat] > maxVal) {
+          maxVal = gradeCounts[cat];
+          topCat = cat;
+        }
+      }
+      return { nombre: topCat, consultas: maxVal };
+    };
+    
+    const topAp = getTopCategory(counts[1]);
+    const topComp = getTopCategory(counts[2]);
+    const topMaest = getTopCategory(counts[3]);
+    
+    elStats.innerHTML = `
+      <div class="grade-stat-item">
+        <div style="display: flex; justify-content: space-between; font-size: 11px; margin-bottom: 4px;">
+          <span style="color: var(--gold-primary); font-weight: 600;">1° Ap:. (Aprendiz)</span>
+          <span style="color: var(--text-secondary);">${topAp.nombre} (${topAp.consultas} consult.)</span>
+        </div>
+        <div style="height: 6px; background: rgba(255,255,255,0.05); border-radius: 3px; overflow: hidden;">
+          <div style="width: ${topAp.consultas > 0 ? Math.min(100, (topAp.consultas/10)*100) : 0}%; height: 100%; background: var(--gold-primary); border-radius: 3px;"></div>
+        </div>
+      </div>
+      <div class="grade-stat-item" style="margin-top: 8px;">
+        <div style="display: flex; justify-content: space-between; font-size: 11px; margin-bottom: 4px;">
+          <span style="color: var(--gold-primary); font-weight: 600;">2° Comp:. (Compañero)</span>
+          <span style="color: var(--text-secondary);">${topComp.nombre} (${topComp.consultas} consult.)</span>
+        </div>
+        <div style="height: 6px; background: rgba(255,255,255,0.05); border-radius: 3px; overflow: hidden;">
+          <div style="width: ${topComp.consultas > 0 ? Math.min(100, (topComp.consultas/10)*100) : 0}%; height: 100%; background: #a0aec0; border-radius: 3px;"></div>
+        </div>
+      </div>
+      <div class="grade-stat-item" style="margin-top: 8px;">
+        <div style="display: flex; justify-content: space-between; font-size: 11px; margin-bottom: 4px;">
+          <span style="color: var(--gold-primary); font-weight: 600;">3° M:. (Maestro y sup.)</span>
+          <span style="color: var(--text-secondary);">${topMaest.nombre} (${topMaest.consultas} consult.)</span>
+        </div>
+        <div style="height: 6px; background: rgba(255,255,255,0.05); border-radius: 3px; overflow: hidden;">
+          <div style="width: ${topMaest.consultas > 0 ? Math.min(100, (topMaest.consultas/10)*100) : 0}%; height: 100%; background: #9b51e0; border-radius: 3px;"></div>
+        </div>
+      </div>
+    `;
+  }
+
+  /**
+   * Define la topología del modelo programáticamente (AutoML simulado)
+   */
+  function crearModelo(hiperparametros) {
+    const model = tf.sequential();
+    
+    // Capa Entrada + Primera Capa Oculta
+    model.add(tf.layers.dense({
+      inputShape: [CONFIG_IA.INPUT_DIM],
+      units: hiperparametros.unidadesCapas,
+      activation: 'relu',
+      kernelInitializer: 'glorotNormal'
+    }));
+    
+    // Capas Ocultas Adicionales
+    for (let i = 1; i < hiperparametros.capasOcultas; i++) {
+      model.add(tf.layers.dense({
+        units: Math.max(4, Math.floor(hiperparametros.unidadesCapas / i)),
+        activation: 'relu',
+        kernelInitializer: 'glorotNormal'
+      }));
+    }
+    
+    // Capa de Salida (Probabilidades de Categoría)
+    model.add(tf.layers.dense({
+      units: CONFIG_IA.OUTPUT_DIM,
+      activation: 'softmax'
+    }));
+
+    // Compilar
+    const optimizer = tf.train.adam(hiperparametros.learningRate);
+    model.compile({
+      optimizer: optimizer,
+      loss: 'categoricalCrossentropy',
+      metrics: ['accuracy']
+    });
+
+    return model;
+  }
+
+  /**
+   * Crea una población de modelos con parámetros aleatorios
+   */
+  function crearPoblacionInicial() {
+    for (let i = 0; i < CONFIG_IA.POBLACION_TAMANO; i++) {
+      const hiperparametros = {
+        capasOcultas: Math.floor(Math.random() * 3) + 1, // 1 a 3 capas ocultas
+        unidadesCapas: [8, 12, 16, 24][Math.floor(Math.random() * 4)], // Neuronas
+        learningRate: [0.01, 0.05, 0.1, 0.2][Math.floor(Math.random() * 4)] // Tasa de aprendizaje
+      };
+      
+      const tfModel = crearModelo(hiperparametros);
+      
+      estado.poblacion.push({
+        id: i,
+        hiperparametros: hiperparametros,
+        tfModel: tfModel,
+        fitness: 0.0,
+        precision: 0.0
+      });
+    }
+  }
+
+  /**
+   * Evalúa la precisión (fitness) de cada red neuronal en los datos históricos
+   */
+  function evaluarPoblacion() {
+    if (estado.historialLocal.length === 0) {
+      // Estado inicial perfecto 100% confiable
+      estado.poblacion.forEach(ind => {
+        ind.precision = 1.0;
+        ind.fitness = 1.0;
+      });
+      estado.mejorModeloIdx = 0;
+      return;
+    }
+    
+    tf.tidy(() => {
+      // 1. Convertir datos de historial a tensores de entrada y salida
+      const inputs = [];
+      const targets = [];
+      
+      estado.historialLocal.forEach(h => {
+        // Normalización simple
+        const normGrado = h.grado / 95.0;
+        const normHora = h.hora / 23.0;
+        const normDia = h.dia / 6.0;
+        
+        inputs.push([normGrado, normHora, normDia]);
+        
+        // One-hot target
+        const target = new Array(CONFIG_IA.OUTPUT_DIM).fill(0);
+        target[h.categoriaIdx] = 1;
+        targets.push(target);
+      });
+
+      const xs = tf.tensor2d(inputs);
+      const ys = tf.tensor2d(targets);
+
+      // 2. Evaluar cada modelo de la población
+      estado.poblacion.forEach(ind => {
+        const pred = ind.tfModel.predict(xs);
+        // Calcular pérdida de entropía cruzada simple en JS para evitar overhead de tensores
+        const predData = pred.arraySync();
+        const targetData = ys.arraySync();
+        
+        let correctas = 0;
+        for (let i = 0; i < predData.length; i++) {
+          const maxPredIdx = predData[i].indexOf(Math.max(...predData[i]));
+          const maxTargetIdx = targetData[i].indexOf(Math.max(...targetData[i]));
+          if (maxPredIdx === maxTargetIdx) {
+            correctas++;
+          }
+        }
+        
+        // Fitness es el porcentaje de aciertos
+        ind.precision = correctas / predData.length;
+        ind.fitness = ind.precision;
+      });
+    });
+
+    // Encontrar el mejor modelo de la generación
+    let mejorIdx = 0;
+    let mejorFit = -1;
+    for (let i = 0; i < estado.poblacion.length; i++) {
+      if (estado.poblacion[i].fitness > mejorFit) {
+        mejorFit = estado.poblacion[i].fitness;
+        mejorIdx = i;
+      }
+    }
+    
+    estado.mejorModeloIdx = mejorIdx;
+  }
+
+  /**
+   * Ejecuta una ronda del algoritmo genético (Cruce, Mutación y Selección)
+   */
+  function evolveGeneration() {
+    estado.generacion++;
+    
+    // 1. Evaluar población
+    evaluarPoblacion();
+    
+    // 2. Ordenar por fitness decreciente
+    estado.poblacion.sort((a, b) => b.fitness - a.fitness);
+    
+    // 3. Crear nueva generación
+    const nuevaPoblacion = [];
+    
+    // Elitismo: Los 3 mejores sobreviven intactos
+    for (let i = 0; i < 3; i++) {
+      // Duplicamos el modelo y sus pesos
+      const clon = clonarIndividuo(estado.poblacion[i], i);
+      nuevaPoblacion.push(clon);
+    }
+    
+    // El resto se genera mediante cruce y mutación
+    for (let i = 3; i < CONFIG_IA.POBLACION_TAMANO; i++) {
+      // Selección de padres (ruleta simplificada basada en el top 5)
+      const padreA = estado.poblacion[Math.floor(Math.random() * 5)];
+      const padreB = estado.poblacion[Math.floor(Math.random() * 5)];
+      
+      // Crossover de hiperparámetros
+      const nuevosHP = {
+        capasOcultas: Math.random() > 0.5 ? padreA.hiperparametros.capasOcultas : padreB.hiperparametros.capasOcultas,
+        unidadesCapas: Math.random() > 0.5 ? padreA.hiperparametros.unidadesCapas : padreB.hiperparametros.unidadesCapas,
+        learningRate: Math.random() > 0.5 ? padreA.hiperparametros.learningRate : padreB.hiperparametros.learningRate
+      };
+      
+      // Mutación
+      if (Math.random() < CONFIG_IA.MUTACION_RATA) {
+        nuevosHP.capasOcultas = Math.floor(Math.random() * 3) + 1;
+      }
+      if (Math.random() < CONFIG_IA.MUTACION_RATA) {
+        nuevosHP.unidadesCapas = [8, 12, 16, 24][Math.floor(Math.random() * 4)];
+      }
+      if (Math.random() < CONFIG_IA.MUTACION_RATA) {
+        nuevosHP.learningRate = [0.01, 0.05, 0.1, 0.2][Math.floor(Math.random() * 4)];
+      }
+      
+      const nuevoTfModel = crearModelo(nuevosHP);
+      
+      // Crossover de pesos (Transferencia parcial)
+      crossoverPesos(padreA.tfModel, padreB.tfModel, nuevoTfModel);
+      
+      nuevaPoblacion.push({
+        id: i,
+        hiperparametros: nuevosHP,
+        tfModel: nuevoTfModel,
+        fitness: 0.0,
+        precision: 0.0
+      });
+    }
+    
+    // Eliminar viejos modelos de la memoria de TF.js para evitar memory leaks
+    estado.poblacion.forEach((ind, idx) => {
+      // No eliminar los que clonamos si los guardamos, pero dado que creamos clones nuevos con pesos clonados,
+      // eliminamos todos los modelos anteriores.
+      ind.tfModel.dispose();
+    });
+    
+    // Reemplazar población
+    estado.poblacion = nuevaPoblacion;
+    
+    // Evaluar y actualizar interfaz
+    evaluarPoblacion();
+    actualizarDashboard();
+    dibujarRedNeuronal();
+  }
+
+  /**
+   * Clona un individuo y duplica sus pesos en TensorFlow.js
+   */
+  function clonarIndividuo(ind, nuevoId) {
+    const modeloClon = crearModelo(ind.hiperparametros);
+    tf.tidy(() => {
+      const pesosOriginales = ind.tfModel.getWeights();
+      const pesosClonados = pesosOriginales.map(w => w.clone());
+      modeloClon.setWeights(pesosClonados);
+    });
+    
+    return {
+      id: nuevoId,
+      hiperparametros: {...ind.hiperparametros},
+      tfModel: modeloClon,
+      fitness: ind.fitness,
+      precision: ind.precision
+    };
+  }
+
+  /**
+   * Combina y muta pesos de dos modelos en un tercero
+   */
+  function crossoverPesos(modeloA, modeloB, modeloDestino) {
+    tf.tidy(() => {
+      const pesosA = modeloA.getWeights();
+      const pesosB = modeloB.getWeights();
+      const pesosDest = modeloDestino.getWeights();
+      const pesosNuevos = [];
+      
+      for (let i = 0; i < pesosDest.length; i++) {
+        const shapeStr = pesosDest[i].shape.join(',');
+        
+        // Si el tamaño y forma coinciden en A y B, hacemos crossover
+        if (i < pesosA.length && i < pesosB.length &&
+            pesosA[i].shape.join(',') === shapeStr &&
+            pesosB[i].shape.join(',') === shapeStr) {
+          
+          const mask = tf.randomUniform(pesosDest[i].shape).greater(0.5);
+          let pesoCruza = tf.where(mask, pesosA[i], pesosB[i]);
+          
+          if (Math.random() < CONFIG_IA.MUTACION_RATA) {
+            const ruido = tf.randomNormal(pesosDest[i].shape, 0, 0.05);
+            pesoCruza = pesoCruza.add(ruido);
+          }
+          pesosNuevos.push(pesoCruza);
+        } else if (i < pesosA.length && pesosA[i].shape.join(',') === shapeStr) {
+          // Si solo coincide la forma de A, usamos A
+          let pesoA = pesosA[i].clone();
+          if (Math.random() < CONFIG_IA.MUTACION_RATA) {
+            const ruido = tf.randomNormal(pesosDest[i].shape, 0, 0.05);
+            pesoA = pesoA.add(ruido);
+          }
+          pesosNuevos.push(pesoA);
+        } else {
+          // De lo contrario, mantenemos el peso aleatorio original de destino
+          pesosNuevos.push(pesosDest[i].clone());
+        }
+      }
+      
+      modeloDestino.setWeights(pesosNuevos);
+    });
+  }
+
+  /**
+   * Registra una interacción del usuario localmente en el agente para re-entrenar
+   */
+  function registrarLocal(accion, categoria) {
+    const catIdx = CONFIG_IA.CATEGORIAS.indexOf(categoria);
+    if (catIdx === -1) return;
+    
+    const date = new Date();
+    estado.historialLocal.push({
+      grado: parseInt(estado.usuario.grado) || 1,
+      hora: date.getHours(),
+      dia: date.getDay(),
+      categoriaIdx: catIdx
+    });
+    
+    if (estado.conteosActividad[accion] !== undefined) {
+      estado.conteosActividad[accion]++;
+    }
+    
+    // Re-evaluar
+    evaluarPoblacion();
+    actualizarDashboard();
+    
+    // Si está activa la autoevolución, forzar una evolución al cabo de 1 seg
+    if (!estado.autoevolucionActiva) {
+      evolveGeneration();
+    }
+  }
+
+  /**
+   * Retorna conteo local de actividades
+   */
+  function obtenerEstadisticasLocales() {
+    return estado.conteosActividad;
+  }
+
+  /**
+   * Actualiza los datos textuales de la IA en el panel HTML
+   */
+  function actualizarDashboard() {
+    const elGen = document.getElementById("gen-number");
+    const elFit = document.getElementById("gen-fitness");
+    
+    if (elGen) elGen.textContent = estado.generacion;
+    if (elFit) {
+      const mejorFit = estado.poblacion[estado.mejorModeloIdx] ? estado.poblacion[estado.mejorModeloIdx].precision : 0.0;
+      elFit.textContent = (mejorFit * 100).toFixed(2) + "%";
+    }
+    
+    // Generar predicciones en tiempo real usando el mejor modelo actual
+    generarPredicciones();
+  }
+
+  /**
+   * Predice categoría recomendada y pico en base al mejor modelo
+   */
+  function generarPredicciones() {
+    if (!estado.poblacion[estado.mejorModeloIdx]) return;
+    
+    tf.tidy(() => {
+      const normGrado = (parseInt(estado.usuario.grado) || 1) / 95.0;
+      const date = new Date();
+      const normHora = date.getHours() / 23.0;
+      const normDia = date.getDay() / 6.0;
+      
+      const inputTensor = tf.tensor2d([[normGrado, normHora, normDia]]);
+      const prediction = estado.poblacion[estado.mejorModeloIdx].tfModel.predict(inputTensor);
+      const probabilities = prediction.arraySync()[0];
+      
+      // Clasificar las afinidades predichas por el modelo neural
+      const sortedAffinities = probabilities
+        .map((prob, idx) => ({ prob, name: CONFIG_IA.CATEGORIAS[idx] }))
+        .sort((a, b) => b.prob - a.prob);
+      
+      // 1. Senda Afín (Explotación): La de mayor probabilidad
+      const catRecomendada = sortedAffinities[0].name;
+      const elCat = document.getElementById("pred-category");
+      if (elCat) elCat.textContent = catRecomendada;
+      
+      // 2. Senda de Expansión (Exploración): Temas ajenos (menor afinidad habitual)
+      // Escogemos el de menor probabilidad para sugerir temas menos explorados
+      let catExpansion = sortedAffinities[sortedAffinities.length - 1].name;
+      if (catExpansion === catRecomendada && sortedAffinities.length > 1) {
+        catExpansion = sortedAffinities[1].name;
+      }
+      const elExp = document.getElementById("pred-expansion");
+      if (elExp) elExp.textContent = catExpansion;
+      
+      // Guardar de forma global para ordenar el catálogo e incorporar el badge
+      window.iaRecomendada = catRecomendada;
+      window.iaExpansion = catExpansion;
+      if (typeof distribuirYRenderizar === 'function' && typeof allBooks !== 'undefined') {
+        distribuirYRenderizar(allBooks);
+      }
+      
+      // Pico recomendado (simulado en base a la hora de mayor afinidad de la base de datos)
+      const elHour = document.getElementById("pred-hour");
+      if (elHour) {
+        // En base a la hora de mayor frecuencia en los datos semilla
+        const horas = estado.historialLocal.map(h => h.hora);
+        const horaPico = horas.sort((a,b) =>
+          horas.filter(v => v===a).length - horas.filter(v => v===b).length
+        ).pop() || 12;
+        elHour.textContent = `${horaPico}:00 Hrs (Mediodía)`;
+      }
+    });
+  }
+
+  /**
+   * Dibuja los nodos y pesos de la red neuronal en el Canvas HTML5
+   */
+  function dibujarRedNeuronal() {
+    const canvas = document.getElementById("neural-canvas");
+    if (!canvas) return;
+    
+    const ctx = canvas.getContext("2d");
+    const container = canvas.parentElement;
+    
+    // Ajustar dimensiones lógicas al tamaño del contenedor físico
+    canvas.width = container.clientWidth;
+    canvas.height = container.clientHeight;
+    
+    const W = canvas.width;
+    const H = canvas.height;
+    
+    // Limpiar canvas
+    ctx.clearRect(0, 0, W, H);
+    
+    const mejorModelo = estado.poblacion[estado.mejorModeloIdx];
+    if (!mejorModelo) return;
+    
+    const hp = mejorModelo.hiperparametros;
+    
+    // Definir estructura de capas para el dibujo
+    // Capa de Entrada (3 nodos), Capa(s) Oculta(s) (hp.unidadesCapas nodos, etc.), Capa Salida (6 nodos)
+    const estructura = [CONFIG_IA.INPUT_DIM];
+    for (let i = 0; i < hp.capasOcultas; i++) {
+      estructura.push(Math.min(10, Math.max(4, Math.floor(hp.unidadesCapas / (i+1))))); // Cap limitamos a max 10 para dibujo limpio
+    }
+    estructura.push(CONFIG_IA.OUTPUT_DIM);
+    
+    // Calcular posiciones de los nodos
+    const capaEspacio = W / (estructura.length);
+    const nodosPos = [];
+    
+    estructura.forEach((numNodos, capaIdx) => {
+      const x = (capaIdx * capaEspacio) + (capaEspacio / 2);
+      const nodoEspacio = H / (numNodos + 1);
+      const nodosCapa = [];
+      
+      for (let nIdx = 0; nIdx < numNodos; nIdx++) {
+        const y = (nIdx * nodoEspacio) + nodoEspacio;
+        nodosCapa.push({ x: x, y: y });
+      }
+      nodosPos.push(nodosCapa);
+    });
+    
+    // 1. Dibujar conexiones (Sinapsis) con glows
+    ctx.lineWidth = 0.8;
+    for (let c = 0; c < nodosPos.length - 1; c++) {
+      const capaOrigen = nodosPos[c];
+      const capaDestino = nodosPos[c+1];
+      
+      capaOrigen.forEach((origen, oIdx) => {
+        capaDestino.forEach((destino, dIdx) => {
+          // Intensidad y color basados en un patrón de peso simulado
+          const pseudoPeso = Math.sin(oIdx * 0.5 + dIdx * 0.8 + c);
+          if (pseudoPeso > 0) {
+            ctx.strokeStyle = `rgba(229, 181, 69, ${pseudoPeso * 0.25})`; // Oro
+          } else {
+            ctx.strokeStyle = `rgba(255, 255, 255, ${Math.abs(pseudoPeso) * 0.1})`; // Blanco
+          }
+          
+          ctx.beginPath();
+          ctx.moveTo(origen.x, origen.y);
+          ctx.lineTo(destino.x, destino.y);
+          ctx.stroke();
+        });
+      });
+    }
+    
+    // 2. Dibujar Nodos
+    const nombresEntrada = ["Grado", "Hora", "Día"];
+    const nombresSalida = CONFIG_IA.CATEGORIAS.map(cat => {
+      if (!cat) return "Otr";
+      const c = cat.toString().trim();
+      if (c.indexOf("Simbolog") !== -1) return "Sim";
+      if (c.indexOf("Filosof") !== -1) return "Fil";
+      if (c.indexOf("Histor") !== -1) return "Hist";
+      if (c.indexOf("Esoter") !== -1 || c.indexOf("Hermet") !== -1) return "Esot";
+      if (c.indexOf("Memphis") !== -1 || c.indexOf("Misra") !== -1) return "M-M";
+      if (c.indexOf("Revistas") !== -1 || c.indexOf("Actas") !== -1) return "Act";
+      if (c.indexOf("Mecán") !== -1 || c.indexOf("Mecan") !== -1) return "Mec";
+      if (c.indexOf("Otro") !== -1) return "Otr";
+      return c.length > 4 ? c.substring(0, 4) : c;
+    });
+    
+    nodosPos.forEach((capa, capaIdx) => {
+      capa.forEach((nodo, nIdx) => {
+        // Determinar tipo de nodo
+        let colorFill = "#050b14";
+        let colorStroke = "rgba(255, 255, 255, 0.4)";
+        let glowColor = "rgba(255, 255, 255, 0.2)";
+        let radio = 6;
+        
+        if (capaIdx === 0) {
+          colorStroke = "#e5b545"; // Oro para entradas
+          glowColor = "rgba(229, 181, 69, 0.4)";
+          radio = 8;
+        } else if (capaIdx === nodosPos.length - 1) {
+          colorStroke = "#fff"; // Blanco para salida
+          glowColor = "rgba(255, 255, 255, 0.4)";
+          radio = 8;
+        }
+        
+        // Efecto Glow del Nodo
+        ctx.shadowBlur = 10;
+        ctx.shadowColor = glowColor;
+        
+        ctx.fillStyle = colorFill;
+        ctx.strokeStyle = colorStroke;
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.arc(nodo.x, nodo.y, radio, 0, 2 * Math.PI);
+        ctx.fill();
+        ctx.stroke();
+        
+        // Reset shadow
+        ctx.shadowBlur = 0;
+        
+        // Texto de etiquetas en Entrada y Salida
+        ctx.fillStyle = "#a0aec0";
+        ctx.font = "bold 9px 'Outfit', sans-serif";
+        ctx.textAlign = "center";
+        
+        if (capaIdx === 0) {
+          ctx.fillText(nombresEntrada[nIdx], nodo.x - 22, nodo.y + 3);
+        } else if (capaIdx === nodosPos.length - 1) {
+          ctx.fillText(nombresSalida[nIdx], nodo.x + 22, nodo.y + 3);
+        }
+      });
+    });
+  }
+
+  // Redibujar la red neuronal cuando cambie el tamaño del viewport (100% responsivo)
+  window.addEventListener("resize", function() {
+    if (estado.inicializado) {
+      dibujarRedNeuronal();
+    }
+  });
+
+  /**
+   * Activa o desactiva la autoevolución recurrente
+   */
+  function toggleAutoEvolution() {
+    const btn = document.getElementById("btn-train-auto");
+    if (estado.autoevolucionActiva) {
+      // Detener
+      clearInterval(estado.intervaloAuto);
+      estado.autoevolucionActiva = false;
+      if (btn) {
+        btn.textContent = "Autoevolución Continua";
+        btn.className = "masonic-btn-sm btn-gold";
+      }
+    } else {
+      // Iniciar
+      estado.autoevolucionActiva = true;
+      if (btn) {
+        btn.textContent = "Detener Evolución";
+        btn.className = "masonic-btn-sm btn-error";
+        btn.style.background = "var(--error-color)";
+        btn.style.color = "#000";
+      }
+      
+      estado.intervaloAuto = setInterval(function() {
+        evolveGeneration();
+      }, 5000); // Evoluciona cada 5 segundos
+    }
+  }
+
+  // API Pública expuesta
+  return {
+    iniciar: iniciar,
+    evolveOneGeneration: evolveGeneration,
+    toggleAutoEvolution: toggleAutoEvolution,
+    registrarLocal: registrarLocal,
+    obtenerEstadisticasLocales: obtenerEstadisticasLocales,
+    dibujarRedNeuronal: dibujarRedNeuronal
+  };
+})();
+
+// Shortcuts globales para el HTML
+function evolveOneGeneration() {
+  window.tfAgent.evolveOneGeneration();
+}
+function toggleAutoEvolution() {
+  window.tfAgent.toggleAutoEvolution();
+}
+</script>
